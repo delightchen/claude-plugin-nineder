@@ -219,7 +219,13 @@ claude mcp login redmine
 7. **journal Note 的文字描述超過 4 行時,先整理成幾行重點摘要放在 Note 開頭,完整過程/
    細節改用 `{{collapse(標題文字)...}}` macro 包起來預設收合**——讓人掃過 Note 串就能抓到
    每一則的重點,需要細節再展開。
-8. **API 角色權限上限**:議題狀態透過 API 最多只能推到 Resolved,最終的 Closed 需要使用
+8. **圖片附件要內嵌顯示並收合**:上傳圖片/桌面截圖到 Redmine 後(用上面的
+   upload_attachment.sh 拿 token、掛進 `uploads` 參數),不能只留在附件列表——要在
+   description 或 Note 內文用 Redmine 行內圖片語法把檔名包起來(`!檔名.png!`,動圖
+   `!檔名.gif!` 同理),並把這行圖片語法放進 `{{collapse(標題文字)...}}` macro 裡、標題給
+   簡短說明文字(例如「畫面截圖:登入錯誤訊息」),預設收合、點標題才展開圖片——大圖不
+   佔版面,讀者也知道收合裡是什麼圖。
+9. **API 角色權限上限**:議題狀態透過 API 最多只能推到 Resolved,最終的 Closed 需要使用
    者自己在網頁上操作;這個站台的 done_ratio 由狀態自動計算,手動設定無效——遇到「幫我
    關掉議題」的需求,推到 Resolved 之後老實跟使用者說最後一步要他自己點。
 

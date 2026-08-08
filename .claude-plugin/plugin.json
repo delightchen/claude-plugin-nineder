@@ -2,7 +2,7 @@
   "name": "redmine",
   "displayName": "Redmine Skill Plugin",
   "description": "耐德科技 Redmine（redmine.nineder.com）技能組：/redmine 查詢建立更新議題、redmine-feature Feature 需求撰寫規範、/redmine-feature-create 互動式建立 Feature 需求單、/redmine-bug Bug 撰寫規範、/redmine-bug-create 互動式建立 Bug 單。規格議題：#26309/#26311/#26312/#26313/#26314/#26315",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "author": {
     "name": "陳昶任 delight",
     "email": "delight@nineder.com"
