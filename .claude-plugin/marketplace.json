@@ -1,0 +1,16 @@
+{
+  "name": "nineder",
+  "owner": {
+    "name": "耐德科技 系統整合部",
+    "email": "delight@nineder.com"
+  },
+  "description": "耐德科技組織內部 Claude Plugin marketplace",
+  "plugins": [
+    {
+      "name": "redmine",
+      "source": "./",
+      "description": "耐德科技 Redmine 技能組：/redmine 讀寫議題、redmine-feature 撰寫規範、/redmine-feature-create 互動建單",
+      "category": "productivity"
+    }
+  ]
+}
