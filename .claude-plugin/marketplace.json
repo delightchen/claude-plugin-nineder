@@ -9,7 +9,7 @@
     {
       "name": "redmine",
       "source": "./",
-      "description": "耐德科技 Redmine 技能組：/redmine 讀寫議題、redmine-feature 撰寫規範、/redmine-feature-create 互動建單",
+      "description": "耐德科技 Redmine 技能組：/redmine 讀寫議題、redmine-feature 撰寫規範、/redmine-feature-create 互動建單、redmine-bug Bug 撰寫規範、/redmine-bug-create 互動建 Bug 單",
       "category": "productivity"
     }
   ]
