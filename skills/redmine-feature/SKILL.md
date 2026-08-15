@@ -95,13 +95,14 @@ Drive/Xmind），而且特性描述本身已經把每個畫面情境講清楚，
 
 **1. Git commit —— 只要這次工作有 commit 就必須留連結**
 
-來源是 <https://gitlab.nineder.com>。逐條列出，多個 commit 就多列，跨 repo 就分組：
+公司 GitLab 是 <https://gitlabnew.nineder.com>（舊機 `gitlab.nineder.com` 已不再服務，**不要
+往那個 host 產連結**）。逐條列出，多個 commit 就多列，跨 repo 就分組：
 
 ```
 Repository: nineder/claude/plugin/redmine
 Branch: main
 Commit: 47f2e4f — 3.1.3: redmine-bug spec v1.2
-Link: https://gitlab.nineder.com/nineder/claude/plugin/redmine/-/commit/47f2e4f
+Link: https://gitlabnew.nineder.com/nineder/claude/plugin/redmine/-/commit/47f2e4f
 ```
 
 不可只寫「已 commit」，也不可只給 hash 不給連結。
