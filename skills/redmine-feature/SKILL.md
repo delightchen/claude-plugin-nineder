@@ -1,6 +1,6 @@
 ---
 name: redmine-feature
-description: 在公司 Redmine(redmine.nineder.com)撰寫 Feature 類型的需求單時使用——依公司慣用的「特性描述(Feature Description: As a/I want/so that)」+「驗收標準(Acceptance Criteria: Given/When/Then)」+「附加資訊(Additional Information)」格式，寫出具體、可驗收、工程師不用來回追問就能開工的需求描述。當使用者要開新的 Feature 議題、要把口頭/文字需求整理成 Redmine 格式、或要 review/潤飾別人寫的需求描述夠不夠清楚時觸發。
+description: 在公司 Redmine(redmine.nineder.com)撰寫 Feature 類型的議題內容時使用——依公司慣用的「特性描述(Feature Description: As a/I want/so that)」+「驗收標準(Acceptance Criteria: Given/When/Then)」+「附加資訊(Additional Information)」格式產出。涵蓋兩種情境：(1) 需求者提出需求，寫出具體、可驗收、工程師不用來回追問就能開工的需求描述；(2) 開發者做完開發或環境調整後快速 Note 留痕，強制附上 GitLab commit 連結、動到的 GCP Machine 名稱與連結、以及重大結論/異動記錄。當使用者要開新的 Feature 議題、要把口頭/文字需求整理成 Redmine 格式、要 review/潤飾別人寫的需求描述、或要把剛做完的工作整理成議題內容時觸發。
 ---
 
 # Redmine 需求撰寫（特性描述 + 驗收標準）
@@ -19,6 +19,17 @@ description: 在公司 Redmine(redmine.nineder.com)撰寫 Feature 類型的需�
 實來源是 Redmine 議題 "#26312":https://redmine.nineder.com/issues/26312 （並繼承
 "#26311":https://redmine.nineder.com/issues/26311 基本寫入準則的全部條款）——之後要修改本
 skill 的內容，先修訂 #26312 再同步這份檔案。
+
+## 先辨識情境：需求者提需求 vs 開發者快速 Note
+
+同一份三段式範本要吃下兩種情境，進來先判斷是哪一種：
+
+| 情境 | 訊號 | 產出重點 |
+| --- | --- | --- |
+| **需求者提出需求** | 語句指向「未來要做什麼」——想要、希望、需要新增、應該可以… | 三段式寫滿寫具體，讓工程師不追問就能開工（下面「三段式結構」全套適用） |
+| **開發者快速 Note** | 語句指向「已經做了什麼」——我把、已經、改好了、跑完了、剛部署… | 骨架可精簡，但**留痕欄位必填**（見「開發者快速 Note」段） |
+
+**辨識不出來就問一句**「這是要提出的需求，還是已經做完要留 Note？」——不要自行預設。
 
 ## 三段式結構
 
@@ -63,6 +74,66 @@ Drive/Xmind），而且特性描述本身已經把每個畫面情境講清楚，
 空白的附加資訊本身不是問題（單純的小功能不需要），但如果特性描述和驗收標準都偏籠統、
 附加資訊又是空的，這張需求單幾乎必然會在 journal 裡靠好幾輪往返把細節問出來。
 
+## 開發者快速 Note（做完之後回填留痕）
+
+開發者情境求快，骨架可以精簡，但**不是可以少寫**——少的是敘事，不是事實。
+
+### 骨架改成回顧式
+
+| 欄位 | 開發者 Note 要填什麼 |
+| --- | --- |
+| 身為 (As a) | 實際執行的角色或系統（哪個服務／哪台機器／哪個 plugin） |
+| 我想要 (I want) | 實際**做了什麼機制**，不是打算做什麼 |
+| 以至於 (so that) | 解決掉哪個可驗證的問題 |
+| 假定 (Given) | 改動前的狀態 |
+| 當 (When) | 實際下的動作或指令 |
+| 然後 (Then) | 改完後觀察到的結果與驗證方式 |
+
+可以短，但**不可以只寫「已完成」**這種沒有內容的句子。
+
+### 留痕三件事（附加資訊必填）
+
+**1. Git commit —— 只要這次工作有 commit 就必須留連結**
+
+來源是 <https://gitlab.nineder.com>。逐條列出，多個 commit 就多列，跨 repo 就分組：
+
+```
+Repository: nineder/claude/plugin/redmine
+Branch: main
+Commit: 47f2e4f — 3.1.3: redmine-bug spec v1.2
+Link: https://gitlab.nineder.com/nineder/claude/plugin/redmine/-/commit/47f2e4f
+```
+
+不可只寫「已 commit」，也不可只給 hash 不給連結。
+
+**2. GCP Machine —— 只要動到機器就必須留名稱＋連結**
+
+「動到」包含：建立、刪除、改規格、改開機設定、改防火牆／網路、重啟。格式：
+
+```
+Machine: redmine-test-nineder-plugin
+Project: nineder-admin ｜ Zone: asia-east1-b
+Link: https://console.cloud.google.com/compute/instancesDetail/zones/asia-east1-b/instances/redmine-test-nineder-plugin?project=nineder-admin
+```
+
+只改機器內的軟體設定、沒動到機器本身，一樣要列出機器名稱，並註明改的是哪個服務／檔案。
+
+**3. 重大結論／異動記錄 —— 寫在 Description 底部的固定清單**
+
+附加資訊最後放一個表，逐條「日期 — 結論或異動 — 依據連結（commit／機器／議題）」，讓未來
+review 時**單看 Description 就掌握全貌**，不必翻 journal。
+
+判定「重大」的門檻（符合任一即是）：
+
+- 改變架構或流程
+- 改變對外行為或介面
+- 推翻先前的決策
+- 造成資料或環境不可逆的變更
+- 影響其他人既有的作業方式
+
+**過程細節（試了什麼、失敗原因、討論往返）仍寫 journal Note，只有結論上 Description。**
+新增條目時先讀最新版 Description 再往清單追加，**不覆蓋既有條目**。
+
 ## 撰寫前自我檢查清單
 
 1. 「身為」那格換成別的同事來看，會不會想成別的角色？如果會，要寫更具體。
@@ -74,6 +145,12 @@ Drive/Xmind），而且特性描述本身已經把每個畫面情境講清楚，
    工程師自己來問？
 7. 這張單子如果現在指派出去、完全沒有後續討論，工程師能不能直接開工？如果答案是不確定，
    通常代表某一段還太籠統。
+
+開發者 Note 情境額外檢查：
+
+8. 這次工作有 commit 嗎？有的話 repo 路徑、branch、hash、連結四項都齊了嗎？
+9. 有動到 GCP 機器嗎？機器名稱、project、zone、Console 連結都齊了嗎？
+10. 這次有沒有符合「重大」門檻的結論或異動？有的話進了 Description 的記錄清單了嗎？
 
 ## 給 review 別人需求單時使用
 

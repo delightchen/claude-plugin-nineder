@@ -34,7 +34,8 @@ claude plugin update redmine@nineder
 - `.claude-plugin/marketplace.json` — 本 repo 同時是 marketplace（名稱 `nineder`）
 - `skills/redmine/` — 主 skill：MCP 連線偵測/設定引導/任務執行/寫入準則；
   `scripts/upload_attachment.sh` 為大檔案附件上傳腳本
-- `skills/redmine-feature/` — 被動的 Feature 需求撰寫規範（review 用，不執行寫入）
+- `skills/redmine-feature/` — 被動的 Feature 撰寫規範（review 用，不執行寫入）：需求者提需求
+  ＋開發者快速 Note 雙情境，Note 情境強制留 GitLab commit／GCP Machine／重大結論記錄
 - `skills/redmine-feature-create/` — 主動的互動式建單流程
 - `skills/redmine-bug/` — 被動的 Bug 撰寫規範（回報型/調查型分流，review 用，不執行寫入）
 - `skills/redmine-bug-create/` — 主動的互動式 Bug 建單流程
