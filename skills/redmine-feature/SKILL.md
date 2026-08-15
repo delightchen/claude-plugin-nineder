@@ -95,14 +95,19 @@ Drive/Xmind），而且特性描述本身已經把每個畫面情境講清楚，
 
 **1. Git commit —— 只要這次工作有 commit 就必須留連結**
 
-公司 GitLab 是 <https://gitlabnew.nineder.com>（舊機 `gitlab.nineder.com` 已不再服務，**不要
-往那個 host 產連結**）。逐條列出，多個 commit 就多列，跨 repo 就分組：
+公司 GitLab 一律寫 <https://gitlab.nineder.com>——**不要寫 `gitlabnew.nineder.com`**，即使
+本機 repo 的 `git remote` 目前還指向 gitlabnew 也一樣，連結要往 `gitlab.nineder.com` 產。
+
+> 移機進行中：`gitlab.nineder.com` 在耐德內網目前連不上（等 AD 設定），這是**預期狀態**，
+> 不是連結寫錯。不要因為 curl / 瀏覽器打不開就自作主張改回 gitlabnew。
+
+逐條列出，多個 commit 就多列，跨 repo 就分組：
 
 ```
 Repository: nineder/claude/plugin/redmine
 Branch: main
 Commit: 47f2e4f — 3.1.3: redmine-bug spec v1.2
-Link: https://gitlabnew.nineder.com/nineder/claude/plugin/redmine/-/commit/47f2e4f
+Link: https://gitlab.nineder.com/nineder/claude/plugin/redmine/-/commit/47f2e4f
 ```
 
 不可只寫「已 commit」，也不可只給 hash 不給連結。
