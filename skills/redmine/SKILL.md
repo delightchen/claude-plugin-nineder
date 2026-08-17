@@ -263,6 +263,21 @@ claude mcp login redmine
 12. **API 角色權限上限**:議題狀態透過 API 最多只能推到 Resolved,最終的 Closed 需要使用
     者自己在網頁上操作;這個站台的 done_ratio 由狀態自動計算,手動設定無效——遇到「幫我
     關掉議題」的需求,推到 Resolved 之後老實跟使用者說最後一步要他自己點。
+13. **公司 GitLab 連結一律寫 `gitlab.nineder.com`**(規格: "#26311":https://redmine.nineder.com/issues/26311 第 15 條):
+    寫進 Redmine 的任何公司 GitLab 連結,**網址與連結文字都不得出現 `gitlabnew.nineder.com`**
+    ——即使本機 repo 的 `git remote` 目前仍指向 gitlabnew 也一樣。兩個例外:(1) 外部第三方
+    的 github.com、gitlab.com 等,照原網址寫;(2) 確實在指稱 gitlabnew 那台主機本身(遷移
+    作業、SSH 連上去操作)時是主機名而非連結,可以保留。
+14. **回覆使用者時,議題編號一律輸出為超連結**(規格: "#26311":https://redmine.nineder.com/issues/26311 第 16 條):
+    在對話中提到任何 Redmine 議題編號時,一律輸出成指向
+    `https://redmine.nineder.com/issues/編號` 的超連結,不要只留純文字編號。**使用者訊息中
+    出現的編號同樣適用**——不論在句首、句中,或整句只有它,回覆時都要把該編號輸出成連結,
+    讓對方不必自己複製編號、開瀏覽器、貼網址。本條規範的是對使用者的**回覆**,與第 2 條
+    (寫進 Redmine 的內容裡超連結前後留空白)是不同場景,兩者並存不衝突。
+    *點擊落點(2026-08-17 實測)*:Claude Code 桌面版**一般點擊**會把連結攔到內建的 Claude
+    Browser pane,而該 pane 沒有 Redmine 登入 session、顯示的是登入頁;**按住 Cmd 再點擊**
+    才會外開到系統預設瀏覽器。連結寫法(markdown、裸網址、角括號)完全不影響落點,把 Chrome
+    設為系統預設也不改變一般點擊的行為。使用者回報開在登入頁時,直接提示改用 Cmd 加點擊。
 
 如果 `/redmine` 被呼叫時**完全沒有帶任何任務**(只有指令本身,後面什麼都沒有),不要憑空
 猜測要執行什麼操作。只要回報連線狀態——正常運作,或是需要設定——如果狀態正常,就順便列

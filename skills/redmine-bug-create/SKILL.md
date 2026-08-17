@@ -14,6 +14,12 @@ description: 當使用者輸入 `/redmine-bug-create`，或明確要求「幫我
 "#26311":https://redmine.nineder.com/issues/26311 基本寫入準則的全部條款）——之後要修改本
 skill 的內容，先修訂 #26315 再同步這份檔案。
 
+**回覆時的輸出格式（承 #26311 第 16 條）**：對使用者說話時，提到任何 Redmine 議題編號都要
+輸出成指向 `https://redmine.nineder.com/issues/編號` 的超連結，不要只留純文字編號；使用者
+訊息裡出現的編號同樣適用。Claude Code 桌面版**一般點擊**會落在內建的 Claude Browser（該處
+沒有 Redmine 登入 session、顯示的是登入頁），**Cmd+click** 才會外開到系統預設瀏覽器——使用
+者回報開在登入頁時，提示他改用 Cmd 加點擊。
+
 ## 前置 1 — 確認 Redmine MCP 連線
 
 呼叫 `get_current_user`；沒有這個工具或呼叫出錯，就照 `redmine` skill 的步驟 2 引導使用者

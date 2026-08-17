@@ -20,6 +20,12 @@ description: 在公司 Redmine(redmine.nineder.com)撰寫 Feature 類型的議�
 "#26311":https://redmine.nineder.com/issues/26311 基本寫入準則的全部條款）——之後要修改本
 skill 的內容，先修訂 #26312 再同步這份檔案。
 
+**回覆時的輸出格式（承 #26311 第 16 條）**：對使用者說話時，提到任何 Redmine 議題編號都要
+輸出成指向 `https://redmine.nineder.com/issues/編號` 的超連結，不要只留純文字編號；使用者
+訊息裡出現的編號同樣適用。Claude Code 桌面版**一般點擊**會落在內建的 Claude Browser（該處
+沒有 Redmine 登入 session、顯示的是登入頁），**Cmd+click** 才會外開到系統預設瀏覽器——使用
+者回報開在登入頁時，提示他改用 Cmd 加點擊。
+
 ## 先辨識情境：需求者提需求 vs 開發者快速 Note
 
 同一份三段式範本要吃下兩種情境，進來先判斷是哪一種：
@@ -95,11 +101,10 @@ Drive/Xmind），而且特性描述本身已經把每個畫面情境講清楚，
 
 **1. Git commit —— 只要這次工作有 commit 就必須留連結**
 
-公司 GitLab 一律寫 <https://gitlab.nineder.com>——**不要寫 `gitlabnew.nineder.com`**，即使
-本機 repo 的 `git remote` 目前還指向 gitlabnew 也一樣，連結要往 `gitlab.nineder.com` 產。
-
-> 移機進行中：`gitlab.nineder.com` 在耐德內網目前連不上（等 AD 設定），這是**預期狀態**，
-> 不是連結寫錯。不要因為 curl / 瀏覽器打不開就自作主張改回 gitlabnew。
+連結的 host 規則已升為基本寫入準則第 15 條（規格見
+"#26311":https://redmine.nineder.com/issues/26311 ）：公司 GitLab 一律
+`gitlab.nineder.com`，不得出現 `gitlabnew.nineder.com`；外部第三方的 github.com、gitlab.com
+等照原網址寫。**本段不重複載明 host 規則，一律以該條為準**，要改也在那裡改。
 
 逐條列出，多個 commit 就多列，跨 repo 就分組：
 
