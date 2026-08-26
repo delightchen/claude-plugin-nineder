@@ -60,10 +60,14 @@ skill 行為規格維護在 Redmine 議題，**改 skill 之前先改規格議�
 
 ## 發佈與鏡像
 
-主要開發 remote 是 gitlabnew（本 repo）。GitLab 端已設定 **push mirroring** 到
-GitHub private repo `delightchen/claude-plugin-redmine`（供 claude.ai Organization
-Settings 的 GitHub App 派發使用）——**維護者只要推 gitlabnew，GitHub 鏡像會自動同步**，
-不需要手動雙推。發佈流程維持：改檔 → `plugin.json` version 往上推 → push gitlabnew。
+主要開發 remote 是公司 GitLab（本 repo，host `gitlab.nineder.com`）。GitLab 端已設定
+**push mirroring** 到 GitHub private repo `delightchen/claude-plugin-redmine`（供
+claude.ai Organization Settings 的 GitHub App 派發使用）——**維護者只要讓變更進到
+GitLab main，GitHub 鏡像會自動同步**，不需要手動雙推。
+
+`main` 為保護分支（直接 push 被設為 No one，2026-08-26 起）。發佈流程：改檔 →
+`plugin.json` version 往上推 → push 到 `release/<版本>` 分支 → 開 MR → merge 進 main
+（Maintainer 以上可 merge，可透過 GitLab API 完成整段）。
 
 歷史：本 plugin 取代了舊的「單一 `redmine.skill` 上傳 Organization Settings ＋ 本機
 heredoc 同步」機制（[#26137](https://redmine.nineder.com/issues/26137) 鐵律時代，開發記錄
