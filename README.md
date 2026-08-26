@@ -8,12 +8,25 @@ skill 打包成單一 plugin，組織成員安裝一次即可使用，更新隨 
 ## 安裝（組織成員）
 
 ```bash
-claude plugin marketplace add https://gitlabnew.nineder.com/nineder/claude/plugin/redmine.git
+claude plugin marketplace add https://gitlab.nineder.com/nineder/claude/plugin/redmine.git
 claude plugin install redmine@nineder
 ```
 
-（repo 是 private——第一次 clone 需要 gitlabnew 帳號憑證；機器上要先設定過 git 對
-gitlabnew 的 HTTPS 認證，或改用 SSH URL。）
+（repo 是 private——第一次 clone 需要公司 GitLab（gitlab.nineder.com）帳號憑證；機器上要
+先設定過 git 對 gitlab.nineder.com 的 HTTPS 認證，或改用 SSH URL。）
+
+### 從舊 host（gitlabnew）遷移
+
+2026-08 GitLab 移機前裝過的機器，marketplace 註冊指向 `gitlabnew.nineder.com` 舊網址——
+舊 host 停機後 `claude plugin marketplace update` 會開始失敗。請重新註冊一次（skill 內容、
+hotkey、MCP 授權都不受影響，hotkey 由 SessionStart hook 自動重建）：
+
+```bash
+claude plugin uninstall redmine@nineder
+claude plugin marketplace remove nineder
+claude plugin marketplace add https://gitlab.nineder.com/nineder/claude/plugin/redmine.git
+claude plugin install redmine@nineder
+```
 
 安裝後在 Claude Code 輸入 `/redmine <任務>` 即可使用（首次使用會自動引導完成這台機器的
 Redmine MCP 授權設定）。
