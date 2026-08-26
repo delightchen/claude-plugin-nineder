@@ -20,6 +20,12 @@ description: 在公司 Redmine(redmine.nineder.com)撰寫 Feature 類型的議�
 "#26311":https://redmine.nineder.com/issues/26311 基本寫入準則的全部條款）——之後要修改本
 skill 的內容，先修訂 #26312 再同步這份檔案。
 
+**分工（單一定義處）**：本 skill 是 Feature 議題「格式與內容標準」的單一定義處——
+`redmine-feature-create` 組稿時引用這裡的範本、好壞判斷、留白條件、附加資訊清單與留痕
+規則，不自行重複定義（規格 "#26313":https://redmine.nineder.com/issues/26313 v1.2 起）。
+改格式或判斷標準→改這裡（先修訂 #26312）；改訪談或寫入流程→改 `redmine-feature-create`
+（先修訂 #26313）。
+
 **回覆時的輸出格式（承 #26311 第 16 條）**：對使用者說話時，提到任何 Redmine 議題編號都要
 輸出成指向 `https://redmine.nineder.com/issues/編號` 的超連結，不要只留純文字編號；使用者
 訊息裡出現的編號同樣適用。Claude Code 桌面版**一般點擊**會落在內建的 Claude Browser（該處
