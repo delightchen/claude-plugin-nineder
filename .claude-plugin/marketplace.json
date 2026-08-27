@@ -11,6 +11,15 @@
       "source": "./",
       "description": "耐德科技 Redmine 技能組：/redmine 讀寫議題、redmine-feature 撰寫規範、/redmine-feature-create 互動建單、redmine-bug Bug 撰寫規範、/redmine-bug-create 互動建 Bug 單",
       "category": "productivity"
+    },
+    {
+      "name": "google",
+      "source": {
+        "source": "url",
+        "url": "https://gitlab.nineder.com/nineder/claude/plugin/google.git"
+      },
+      "description": "耐德科技 Google Workspace 技能組：/nineder_google 以個人 nineder.com 帳號讀取與修改 Google Docs、Sheets、Slides。服務端 mcp.nineder.com/google",
+      "category": "productivity"
     }
   ]
 }
