@@ -16,7 +16,7 @@
       "name": "google",
       "source": {
         "source": "url",
-        "url": "https://gitlab.nineder.com/nineder/claude/plugin/google.git"
+        "url": "https://github.com/delightchen/claude-plugin-google.git"
       },
       "description": "耐德科技 Google Workspace 技能組：/nineder_google 以個人 nineder.com 帳號讀取與修改 Google Docs、Sheets、Slides。服務端 mcp.nineder.com/google",
       "category": "productivity"
