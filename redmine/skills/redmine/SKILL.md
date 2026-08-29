@@ -84,18 +84,19 @@ command -v claude
 ### 已註冊舊的 `redmine`(舊網址)
 
 2026 年 8 月起,Redmine MCP 搬到公司統一的 gateway `mcp.nineder.com`,伺服器名稱也改為
-`nineder-redmine`(跟 `nineder-google` 一致)。舊的 `mcp.redmine.nineder.com` 仍在運行,
-但已進入淘汰階段。
+`nineder-redmine`(跟 `nineder-google` 一致)。**舊的 `mcp.redmine.nineder.com` 已經停用**——
+呼叫它只會拿到一則說明搬遷的訊息,不會回傳任何 Redmine 資料。
 
 用 `claude mcp list` 檢查,如果看到名為 `redmine` 且指向 `mcp.redmine.nineder.com` 的項目,
-那是舊的。**新舊可以並存**,名稱不同不會互相干擾,所以先照下面「尚未設定」的步驟把
-`nineder-redmine` 加好、登入、確認能用,**確認新的沒問題之後**再移除舊的:
+那是已經不能用的舊註冊。先照下面「尚未設定」的步驟把 `nineder-redmine` 加好、登入、
+確認查得到資料,**確認新的可用之後**再把舊的移掉:
 
 ```bash
 claude mcp remove redmine --scope user
 ```
 
-不要先移除舊的再加新的——萬一新的有問題,中間會有一段完全不能用的空窗。
+順序不要顛倒。先移除舊的不會讓新的比較快好,但萬一新的設定卡住,連舊端點那則說明
+搬遷去哪裡的訊息都看不到了。
 
 ### 尚未設定
 
