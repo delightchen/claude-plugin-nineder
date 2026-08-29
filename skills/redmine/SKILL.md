@@ -29,7 +29,7 @@ Feature 需求單)一起打包成組織等級的 Claude Plugin(plugin 名稱 `re
 ## 為什麼設定是「以機器為單位」,而不是「以帳號為單位」
 
 Redmine 的存取是透過一個遠端 MCP 伺服器
-(`https://mcp.redmine.nineder.com/mcp`),每個人都用自己的 Redmine API key 個別驗證身份。
+(`https://mcp.nineder.com/redmine/mcp`),每個人都用自己的 Redmine API key 個別驗證身份。
 Claude Code 對遠端 MCP 伺服器的 OAuth 登入(`claude mcp login`)會把產生的憑證
 **只存在這台機器上**——不會透過使用者的 Claude 帳號同步,也不會分享到他的其他電腦上。
 這是刻意設計的:一個人在三台不同電腦上使用 Claude,完全可以(而且經常會)在每台電腦用
@@ -81,6 +81,22 @@ command -v claude
   提醒他裝完之後要開一個**新的終端機視窗**(讓新的 PATH 生效),再回來繼續。在確認
   `command -v claude` 找得到之前,不要往下執行任何 `claude mcp` 指令,也不要假裝已經裝好。
 
+### 已註冊舊的 `redmine`(舊網址)
+
+2026 年 8 月起,Redmine MCP 搬到公司統一的 gateway `mcp.nineder.com`,伺服器名稱也改為
+`nineder-redmine`(跟 `nineder-google` 一致)。舊的 `mcp.redmine.nineder.com` 仍在運行,
+但已進入淘汰階段。
+
+用 `claude mcp list` 檢查,如果看到名為 `redmine` 且指向 `mcp.redmine.nineder.com` 的項目,
+那是舊的。**新舊可以並存**,名稱不同不會互相干擾,所以先照下面「尚未設定」的步驟把
+`nineder-redmine` 加好、登入、確認能用,**確認新的沒問題之後**再移除舊的:
+
+```bash
+claude mcp remove redmine --scope user
+```
+
+不要先移除舊的再加新的——萬一新的有問題,中間會有一段完全不能用的空窗。
+
 ### 尚未設定
 
 自己透過 Bash 執行下面這行指令——它只是註冊伺服器位址,不會驗證任何人的身份,所以可以
@@ -90,36 +106,36 @@ command -v claude
 其他資料夾不能用」的真正原因——從來就不是同步/傳播的問題,而是 scope 設錯了。
 
 ```bash
-claude mcp add --transport http --scope user redmine https://mcp.redmine.nineder.com/mcp
+claude mcp add --transport http --scope user nineder-redmine https://mcp.nineder.com/redmine/mcp
 ```
 
-如果這台機器上 `redmine` 已經註冊過,但只是用 `local` scope(用 `claude mcp list` 檢查——
+如果這台機器上 `nineder-redmine` 已經註冊過,但只是用 `local` scope(用 `claude mcp list` 檢查——
 如果只有在特定幾個專案資料夾才能用,原因就是這個),先把那些殘留的 local 註冊清掉,免得
 留著造成混淆,再用 `user` scope 重新加回去:
 
 ```bash
-claude mcp remove redmine --scope local
-claude mcp add --transport http --scope user redmine https://mcp.redmine.nineder.com/mcp
+claude mcp remove nineder-redmine --scope local
+claude mcp add --transport http --scope user nineder-redmine https://mcp.nineder.com/redmine/mcp
 ```
 
 接著要老實跟使用者說,還差最後一步需要他親自動手,因為那是一個互動式的瀏覽器登入,你沒
 辦法代替他完成:
 
 ```bash
-claude mcp login redmine
+claude mcp login nineder-redmine
 ```
 
 先跟他說清楚接下來會發生什麼事,才不會嚇到他:這個指令會開啟瀏覽器,連到 Redmine MCP
 伺服器自己的登入頁面,使用者要在那裡貼上自己**個人的 Redmine API access key**(在 Redmine
 → 我的帳戶 → API access key,頁面右上角可以找到)。完成後,產生的存取權杖只會存在這台
 機器上。要明確跟他說這是「以機器為單位」的——如果他也在其他電腦上用 Claude,每一台都需
-要各自單獨執行一次 `claude mcp login redmine`,而且每一台都可以用不同的 Redmine 身份,
+要各自單獨執行一次 `claude mcp login nineder-redmine`,而且每一台都可以用不同的 Redmine 身份,
 如果他想要的話。
 
 如果這裡沒有瀏覽器可用(例如透過 SSH 連線的情況),改給他這個指令:
 
 ```bash
-claude mcp login redmine --no-browser
+claude mcp login nineder-redmine --no-browser
 ```
 
 這個指令會印出一個網址,而不是直接開啟瀏覽器。使用者可以在任何有瀏覽器的裝置上打開這個
@@ -139,7 +155,7 @@ claude mcp login redmine --no-browser
 跟上面步驟一樣,但跳過 `claude mcp add`——伺服器本來就已經註冊過了,只需要重新整理憑證:
 
 ```bash
-claude mcp login redmine
+claude mcp login nineder-redmine
 ```
 
 ## 步驟 3 — 執行實際任務
@@ -164,7 +180,7 @@ claude mcp login redmine
 ### 上傳附件(截圖/檔案)時,改用本機腳本拿 token,不要用 `content_base64`
 
 `upload_attachment` 這個 MCP 工具雖然接受 `content_base64` 參數,但只適合幾 KB 內的小檔
-案。這個 MCP server 是部署在公司 VM 上的 remote MCP(`https://mcp.redmine.nineder.com`),
+案。這個 MCP server 是部署在公司 VM 上的 remote MCP(`https://mcp.nineder.com/redmine`),
 跟你現在執行的 Claude Code 不是同一台機器、沒有共用檔案系統——如果檔案內容要先讓 Claude
 讀出來、經過文字生成重新組成 base64 字串再塞進工具參數,大檔案(實測約 100~120KB 的截
 圖)在這個來回搬運過程中會壞掉、byte 數對不上(見 #26221 的踩雷紀錄:重建出的 base64 在
