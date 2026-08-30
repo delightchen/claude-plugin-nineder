@@ -296,6 +296,24 @@ claude mcp login nineder-redmine
     才會外開到系統預設瀏覽器。連結寫法(markdown、裸網址、角括號)完全不影響落點,把 Chrome
     設為系統預設也不改變一般點擊的行為。使用者回報開在登入頁時,直接提示改用 Cmd 加點擊。
 
+15. **需要觀察期的議題,主動提議建立排程提醒**(規格: "#26311":https://redmine.nineder.com/issues/26311 第 18 條):
+    執行議題時,凡結論是「要等一段時間後回來看結果」(部署後觀察、排程跑幾天後驗證、等外部
+    條件成熟),**主動問使用者要不要啟用 Reminder**。使用者確認後依序做三件事:
+    - 把議題狀態改到 Resolved——觀察中,不是還在做。
+    - 先呼叫 `get_issue_reminder_settings` 看 `telegram_bound`(呼叫者**本人**的綁定狀態;
+      `telegram_available` 是全站 Bot 有沒有設好,兩者不同)。未綁定時提醒使用者到 Redmine
+      「我的帳戶」頁用 Telegram Login Widget 完成綁定(流程出處 #26319),並在他綁好之前把
+      channels 設 `telegram,email` 雙管道以免漏接——未綁定者的 Telegram 私訊在送出時會被
+      **靜默略過**(只記進 last_error),不會報錯。
+    - 用 `create_issue_reminder` 在該議題建立提醒:`remind_at` 給**含時區**的 ISO8601
+      (例 `2026-09-05T09:00:00+08:00`,不要依賴使用者的 Redmine 時區設定),`recipients`
+      用 `self`,`note` 寫明屆時要檢查什麼、做什麼收尾(例:「看排程 log 與 last_error,
+      沒問題就把本票與母票 Close」)。
+    - 兩個前提,不滿足時老實說明而不是硬做:工具清單裡沒有 `create_issue_reminder` 表示這台
+      機器還連著舊服務(見上方「MCP 連線設定」重新設定),先改用口頭提醒並說明原因;議題所屬
+      專案要先啟用「議題排程提醒」模組,API 回 403 時請使用者到專案 Settings → Project 分頁
+      最底的 Modules 勾「議題排程提醒」。
+
 如果 `/redmine` 被呼叫時**完全沒有帶任何任務**(只有指令本身,後面什麼都沒有),不要憑空
 猜測要執行什麼操作。只要回報連線狀態——正常運作,或是需要設定——如果狀態正常,就順便列
 出可用的工具,讓使用者知道下次可以怎麼問。
