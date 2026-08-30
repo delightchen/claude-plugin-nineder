@@ -261,6 +261,18 @@ claude mcp login nineder-redmine
    runner`,將內容丟進 `Redmine::WikiFormatting.to_html(Setting.text_formatting, 內容)`,
    檢查產生的 HTML 裡 `<table` 出現次數等於預期表格數、`|={background` 殘留數為 0。排版壞掉
    時只 render 前 k 行、k 從 1 遞增,就能定位到是哪一行出問題。
+   主機是 `redmine6-postgresql16-nineder-vm`(project `nineder-admin`、zone
+   `asia-east1-b`),app 在 `/home/redmine/redmine`,Ruby 走 rbenv,**`bundle` 不在預設
+   PATH**,指令前要自己補 `/home/redmine/.rbenv/shims`。除了讀檔,也可以直接吃
+   `Issue.find(id).description`,驗資料庫實際存的內容(含 Redmine 自己插入的
+   `<notextile>` 標記)。**這個方法有兩個盲點,不要當成全面保證**:(1) *驗不到 macro*
+   ——`{{collapse}}` 這類 macro 是在 view helper 展開的,`to_html` 不會執行它們,在
+   `rails runner` 裡呼叫還會直接報 `undefined method`;macro 有沒有正確展開只能到頁面
+   上用眼睛確認,要確認某個 macro 在這台機器上存在,可以列出
+   `Redmine::WikiFormatting::Macros.available_macros.keys` 來查。(2) *`<pre>` 區塊內不
+   要放形似結尾標籤的字串*——`<pre>` 是用文字比對抓範圍的,內容若出現像 `</code>`、
+   `</pre>` 的字樣,區塊會提早被截斷、結尾標籤被當成內容跳脫掉;要展示這類字串時改用文
+   字敘述,而且不要在外層再包一層帶語言 class 的 `<code>`。
 9. **journal Note 的文字描述超過 4 行時,先整理成幾行重點摘要放在 Note 開頭,完整過程/
    細節改用 `{{collapse(標題文字)...}}` macro 包起來預設收合**——讓人掃過 Note 串就能抓到
    每一則的重點,需要細節再展開。
@@ -327,6 +339,19 @@ claude mcp login nineder-redmine
     器自動轉成連結(與裸編號同理,見 "#26559":https://redmine.nineder.com/issues/26559 的
     實測結論第 3 點),能做到的只有回覆時明確輸出連結;點擊落點限制同第 14 條(一般點擊落
     在 Claude Browser pane,Cmd 加點擊才外開)。
+
+17. **刪除線只能用 Textile 的 `-...-`,而且要和表格、超連結一起驗證**(規格: "#26311":https://redmine.nineder.com/issues/26311 第 20 條):
+    Redmine 不解析 HTML 的 `<del>` 標籤,寫進去會被跳脫成字面文字;一旦出現在 Textile
+    表格儲存格內,那些字面標籤會把整張表洗版。正確寫法是用一對半形減號包住要劃掉的內
+    容。**要同時有刪除線又保留超連結時,減號必須包在最外層**——寫成
+    `-"文字":https://...-`,轉出的是 `<del>` 內含 `<a>`;反過來把減號寫進連結文字裡
+    (`"-文字-":url`)沒有效果,減號會原樣顯示出來。收尾的減號不會被網址吃掉,連結文字
+    或 project id 內部的連字號也不會提前結束刪除線(RedCloth 要求收尾減號後面接空白或標
+    點),這兩點都經實測確認,不要憑推測改寫法。**本條真正的重點是三者的交互**:表格、
+    超連結、刪除線各自單獨都能用,實際壞掉的情形全出現在三者疊在同一個儲存格的時候,所
+    以依第 8 條試算時,驗證樣本必須三者並存,不能只測單項(實例
+    "#26747":https://redmine.nineder.com/issues/26747 連續改錯兩次:先用 `<del>` 標籤把
+    整張表洗版,再為了迴避解析風險把連結整個拿掉,兩次都是分開驗證的後果)。
 
 如果 `/redmine` 被呼叫時**完全沒有帶任何任務**(只有指令本身,後面什麼都沒有),不要憑空
 猜測要執行什麼操作。只要回報連線狀態——正常運作,或是需要設定——如果狀態正常,就順便列
