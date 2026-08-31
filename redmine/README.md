@@ -63,7 +63,8 @@ claude plugin update redmine@nineder
   [#26851](https://redmine.nineder.com/issues/26851)）：你送出的訊息裡只要出現 Redmine 議題編號
   （`#26311` 或議題網址形式），就自動注入一段 context——每個編號對應的
   `redmine.nineder.com` 連結對照表，加上「回覆中編號一律輸出為超連結」（準則第 16 條）與
-  「先把 session 改名為 `#編號 subject`」（第 21 條）兩條提醒。訊息裡出現公司 GitLab repo
+  「先把 session 改名為 `#編號 subject`」（第 21 條）兩條提醒；**全新 session 的第一則訊息**
+  含編號或議題連結時，改名是無條件強制的（不論是否為任務對象）。訊息裡出現公司 GitLab repo
   短路徑（例如 `/charleslu/slap`，第一段命中內建 namespace 清單）時，同樣注入
   `gitlab.nineder.com` 連結候選，由 Claude 依上下文確認真的是 repo 才輸出連結（第 19 條，
   寧可漏連不可錯連；檔案路徑如 `/Users/...` 不會觸發）。不會開啟任何瀏覽器頁面；預設啟用，
