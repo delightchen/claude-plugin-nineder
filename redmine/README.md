@@ -59,12 +59,15 @@ claude plugin update redmine@nineder
   `/redmine`、`/redmine-feature-create`、`/redmine-bug`、`/redmine-bug-create`（不用帶前綴）。Claude Code 的 plugin 指令強制帶命名
   空間前綴，這是官方機制下唯一能保證裸名指令的做法；指標檔只有幾行、不含任何 skill 內容，
   跟舊的 heredoc 內容同步機制（模型驅動、易 drift、易被跳過）本質不同
-- `scripts/issue_context.sh` — UserPromptSubmit hook（[#26559](https://redmine.nineder.com/issues/26559)）：
-  你送出的訊息裡只要出現 Redmine 議題編號（`#26311` 或議題網址形式），就自動注入一段
-  context——每個編號對應的 `redmine.nineder.com` 連結對照表，加上「回覆中編號一律輸出為
-  超連結」（準則第 16 條）與「先把 session 改名為 `#編號 subject`」（第 21 條）兩條提醒。
-  不會開啟任何瀏覽器頁面；預設啟用，設環境變數 `REDMINE_ISSUE_CONTEXT=0` 即停用；腳本
-  fail-open，任何錯誤都不會擋住你的訊息
+- `scripts/issue_context.sh` — UserPromptSubmit hook（[#26559](https://redmine.nineder.com/issues/26559)、
+  [#26851](https://redmine.nineder.com/issues/26851)）：你送出的訊息裡只要出現 Redmine 議題編號
+  （`#26311` 或議題網址形式），就自動注入一段 context——每個編號對應的
+  `redmine.nineder.com` 連結對照表，加上「回覆中編號一律輸出為超連結」（準則第 16 條）與
+  「先把 session 改名為 `#編號 subject`」（第 21 條）兩條提醒。訊息裡出現公司 GitLab repo
+  短路徑（例如 `/charleslu/slap`，第一段命中內建 namespace 清單）時，同樣注入
+  `gitlab.nineder.com` 連結候選，由 Claude 依上下文確認真的是 repo 才輸出連結（第 19 條，
+  寧可漏連不可錯連；檔案路徑如 `/Users/...` 不會觸發）。不會開啟任何瀏覽器頁面；預設啟用，
+  設環境變數 `REDMINE_ISSUE_CONTEXT=0` 即停用；腳本 fail-open，任何錯誤都不會擋住你的訊息
 
 ## 規格治理（單一事實來源）
 
