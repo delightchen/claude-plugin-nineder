@@ -6,16 +6,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/install_hotkeys.sh"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
+          },
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/issue_context.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/install_settings_hook.sh"
           }
         ]
       }

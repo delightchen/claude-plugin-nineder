@@ -68,7 +68,13 @@ claude plugin update redmine@nineder
   短路徑（例如 `/charleslu/slap`，第一段命中內建 namespace 清單）時，同樣注入
   `gitlab.nineder.com` 連結候選，由 Claude 依上下文確認真的是 repo 才輸出連結（第 19 條，
   寧可漏連不可錯連；檔案路徑如 `/Users/...` 不會觸發）。不會開啟任何瀏覽器頁面；預設啟用，
-  設環境變數 `REDMINE_ISSUE_CONTEXT=0` 即停用；腳本 fail-open，任何錯誤都不會擋住你的訊息
+  設環境變數 `REDMINE_ISSUE_CONTEXT=0` 即停用；腳本 fail-open，任何錯誤都不會擋住你的訊息。
+  **執行路徑（v3.14.0 起）**：桌面版 App 不執行 plugin 宣告的 UserPromptSubmit hook（已知
+  CLI/Desktop parity gap，[anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)），
+  所以本 hook 改由 `scripts/install_settings_hook.sh`（SessionStart 時冪等執行）把執行條目
+  維護進使用者的 `~/.claude/settings.json`——settings 層 hooks 官方文件明寫 CLI 與桌面版都
+  適用；plugin 的 hooks.json 刻意**不**宣告 UserPromptSubmit，避免 CLI 環境重複注入。
+  解除安裝 plugin 後該條目會靜默 no-op（有腳本存在性防呆），可手動自 settings.json 移除
 
 ## 規格治理（單一事實來源）
 
