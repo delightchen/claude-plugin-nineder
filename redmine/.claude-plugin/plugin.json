@@ -2,7 +2,7 @@
   "name": "redmine",
   "displayName": "Redmine Skill Plugin",
   "description": "耐德科技 Redmine（redmine.nineder.com）技能組：/redmine 查詢建立更新議題、redmine-feature Feature 需求撰寫規範、/redmine-feature-create 互動式建立 Feature 需求單、/redmine-bug Bug 撰寫規範、/redmine-bug-create 互動式建立 Bug 單。另含 UserPromptSubmit hook：訊息含議題編號或公司 GitLab repo 短路徑時，自動注入連結對照與 session 改名提醒（設 REDMINE_ISSUE_CONTEXT=0 停用）。規格議題：#26309/#26311/#26312/#26313/#26314/#26315/#26559/#26851",
-  "version": "3.14.0",
+  "version": "3.15.0",
   "author": {
     "name": "陳昶任 delight",
     "email": "delight@nineder.com"

@@ -352,6 +352,19 @@ claude mcp login nineder-redmine
     以依第 8 條試算時,驗證樣本必須三者並存,不能只測單項(實例
     "#26747":https://redmine.nineder.com/issues/26747 連續改錯兩次:先用 `<del>` 標籤把
     整張表洗版,再為了迴避解析風險把連結整個拿掉,兩次都是分開驗證的後果)。
+18. **長文寫入不走 MCP 工具,改用本機 curl 直呼 REST API**(規格: "#26311":https://redmine.nineder.com/issues/26311 第 24 條):
+    description 或 notes 的文字量很大時(數千字等級,或同級內容先前曾發生 MCP 寫入失敗),
+    不要把整段內容塞進 MCP 工具參數——內容要先經文字生成組進參數、再由遠端 MCP 服務轉
+    送,過長時會寫不完或直接失敗。與上面「上傳附件」一節同一個原則:大 payload 一律繞開
+    文字轉運,讓 curl 直接從磁碟送出。做法:先把完整內容組成本機 JSON 檔(issue 物件包
+    description 或 notes 欄位),再以 curl 帶 `X-Redmine-API-Key` 標頭直呼 REST API——
+    更新 `PUT /issues/編號.json`、建立 `POST /issues.json`、修改既有 journal
+    `PUT /journals/id.json`——payload 一律用 `--data @檔案路徑` 從檔案讀取,不要把長內容
+    直接寫在指令列上(會再過一次殼層跳脫,且指令列有長度上限);API key 讀本機 `~/.zshrc`
+    匯出的環境變數 `REDMINE_API_KEY`。讀取端同理:長議題(含 `include=journals`)用 curl
+    抓回本機檔案再解析,不必經過 MCP。走 API 直寫時,第 3 條(防互蓋:先重讀最新版再立
+    刻寫回)與第 4 條(更新後驗證)照樣適用,不因繞過 MCP 而省略;含表格或特殊語法時,
+    第 8 條的排版驗證也一樣要做。
 
 如果 `/redmine` 被呼叫時**完全沒有帶任何任務**(只有指令本身,後面什麼都沒有),不要憑空
 猜測要執行什麼操作。只要回報連線狀態——正常運作,或是需要設定——如果狀態正常,就順便列
