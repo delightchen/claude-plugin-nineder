@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# redmine plugin 4.0.0 —— SessionStart bootstrap（分發模型 v2）
-# 規格正本：Redmine #26559（v3.0）；分發模型：#26309【分發模型 v2】；同步器：#26915
+# redmine plugin 4.0.4 —— SessionStart bootstrap（分發模型 v2）
+# 規格正本：Redmine #26559（v3.3）；分發模型：#26309【分發模型 v2】；同步器：#26915
 #
-# plugin 在 v2 之後只剩這一支入口，做四件事，順序固定：
+# plugin 在 v2 之後只剩這一支入口，做五件事，順序固定：
+#   0. 把 hook 需要的兩支腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
 #   1. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全不碰，
 #      之後由 Redmine 附檔自我升版——plugin 永遠不覆寫已安裝的版本）
 #   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit *與 SessionStart* 兩條
@@ -22,12 +23,42 @@ set -uo pipefail
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SKILLS="${HOME}/.claude/skills"
 SELF_SKILL="${SKILLS}/nineder-skill"
+STABLE_BIN="${HOME}/.claude/nineder/bin"
+
+# ---- 0. 把 hook 需要的腳本複製到穩定位置 ----
+# 為什麼 settings.json 不能直接指向 plugin 目錄（#26915 note-27，2026-09-07 實測）：
+# 組織派發的 plugin 放在
+#   ~/Library/Application Support/Claude/local-agent-mode-sessions/<session-id>/…/plugin_<id>/
+# 這個路徑 *含 session id、每次開對話都會變* ，任何寫進 settings.json 的絕對路徑下次就失效。
+# 而 v4.0.3 以前寫死的是 CLI marketplace 路徑，組織派發的機器上那個目錄根本不存在 ——
+# 兩條 hook 於是都指向找不到的檔案（fail-open 不會報錯，但等於完全沒作用）。
+# 解法：把兩支腳本複製到 ~/.claude/nineder/bin/，settings 條目一律指向這裡 ——
+# 兩種派發方式都成立，而且路徑穩定。內容有變才複製，重複執行不動 mtime。
+copied=0
+if [ -f "${PLUGIN_ROOT}/scripts/bootstrap.sh" ] && [ -f "${PLUGIN_ROOT}/scripts/issue_context.sh" ]; then
+  if mkdir -p "${STABLE_BIN}" 2>/dev/null; then
+    for f in bootstrap.sh issue_context.sh; do
+      src="${PLUGIN_ROOT}/scripts/${f}"
+      dst="${STABLE_BIN}/${f}"
+      if ! cmp -s "${src}" "${dst}" 2>/dev/null; then
+        cp "${src}" "${dst}" 2>/dev/null && chmod +x "${dst}" 2>/dev/null && copied=$((copied + 1))
+      fi
+    done
+  fi
+fi
+[ "${copied}" -gt 0 ] && echo "nineder-skill：已更新 ${copied} 支開機腳本到 ~/.claude/nineder/bin/"
 
 # ---- 1. seed ----
-if [ ! -e "${SELF_SKILL}" ] && [ -d "${PLUGIN_ROOT}/seed/nineder-skill" ]; then
-  if mkdir -p "${SKILLS}" 2>/dev/null && cp -R "${PLUGIN_ROOT}/seed/nineder-skill" "${SELF_SKILL}" 2>/dev/null; then
-    [ -f "${SELF_SKILL}/scripts/sync.sh" ] && chmod +x "${SELF_SKILL}/scripts/sync.sh" 2>/dev/null
-    echo "nineder-skill：已在這台機器種下同步器（種子版）。輸入 /nineder-skill 完成設定。"
+if [ ! -e "${SELF_SKILL}" ]; then
+  if [ -d "${PLUGIN_ROOT}/seed/nineder-skill" ]; then
+    if mkdir -p "${SKILLS}" 2>/dev/null && cp -R "${PLUGIN_ROOT}/seed/nineder-skill" "${SELF_SKILL}" 2>/dev/null; then
+      [ -f "${SELF_SKILL}/scripts/sync.sh" ] && chmod +x "${SELF_SKILL}/scripts/sync.sh" 2>/dev/null
+      echo "nineder-skill：已在這台機器種下同步器（種子版）。輸入 /nineder-skill 完成設定。"
+    fi
+  else
+    # 從穩定位置被 hook 呼叫時看不到 plugin 的 seed —— 這是預期，不是錯誤。種子只在第一次
+    # 需要，而第一次一定由 /redmine:setup（帶得到 plugin 路徑）觸發。
+    echo "nineder-skill：同步器尚未安裝。請在對話中輸入 /redmine:setup 完成首次設定。"
   fi
 fi
 
@@ -38,12 +69,14 @@ import json, os, tempfile
 
 home = os.path.expanduser("~")
 path = os.path.join(home, ".claude", "settings.json")
-BASE = "$HOME/.claude/plugins/marketplaces/nineder/redmine/scripts/"
+BASE = "$HOME/.claude/nineder/bin/"
 
 # event -> 腳本檔名。兩條都由 settings 層派送：桌面版不執行 plugin 宣告的任何 hook
 # （UserPromptSubmit 見 #26559 v2.2；SessionStart 於 2026-09-07 實測確認），而 settings
 # 層 CLI 與桌面版皆適用且有 file watcher。SessionStart 指向本腳本自己 —— 這是純桌面版
 # 機器唯一跑得到 bootstrap 的路徑，所以第一次必須由人手動執行一次本腳本（見 README）。
+# 路徑指向 ~/.claude/nineder/bin/（第 0 步複製過去的副本）， *不是* plugin 目錄 ——
+# 組織派發的 plugin 路徑含 session id、每次都變，寫進 settings.json 下次就失效。
 WANT = {"UserPromptSubmit": "issue_context.sh", "SessionStart": "bootstrap.sh"}
 
 try:
@@ -57,11 +90,16 @@ except Exception:
 hooks = data.setdefault("hooks", {})
 changed = False
 for event, script in WANT.items():
-    marker = "marketplaces/nineder/redmine/scripts/" + script
+    # 認得舊版寫進去的條目也要能清掉。4.0.3 以前指向 CLI marketplace 路徑，那條在組織派發
+    # 的機器上永遠找不到檔案；只認新 marker 的話舊條目會留在原地變成重複條目（#26915
+    # note-27）。所以兩種 marker 都算「我們的」，一律換成新的那一條。
+    markers = ("nineder/bin/" + script,
+               "marketplaces/nineder/redmine/scripts/" + script)
     cmd = f'SCRIPT="{BASE}{script}"; [ -x "$SCRIPT" ] && exec "$SCRIPT"; exit 0'
     entries = hooks.get(event) or []
     ours = {"hooks": [{"type": "command", "command": cmd}]}
-    kept = [e for e in entries if marker not in json.dumps(e)]
+    kept = [e for e in entries
+            if not any(m in json.dumps(e) for m in markers)]
     wanted = kept + [ours]
     if wanted != entries:
         hooks[event] = wanted

@@ -2,26 +2,31 @@
 
 耐德科技組織內部的 Claude Plugin。**v4.0.0 起本 plugin 不攜帶任何內容 skill**（v4.0.3 起有一個開機用的 `/redmine:setup` 指令） —— 公司 Skill 的
 內容正本是 Redmine Skill 票的附檔，由 `/nineder-skill` 同步到成員機器的
-`~/.claude/skills/`。plugin 只負責三件事：把同步器種下去、維護 UserPromptSubmit hook、
+`~/.claude/skills/`。plugin 只負責三件事：把同步器種下去、維護 settings 層的兩條 hook、
 每次 session 開始時觸發一次同步。
 
 規範正本：[#26309](https://redmine.nineder.com/issues/26309) 附加資訊【分發模型 v2】。
 
-## 安裝（組織成員）
+## 安裝
+
+**組織成員不必安裝。** plugin 在 claude.ai Organization Settings 設為 `User access: Required`，
+桌面版開啟時自動載入。成員只要**整個重啟** Claude Code，然後在對話裡輸入：
+
+```
+/redmine:setup
+```
+
+（v4.0.3 起提供；v4.0.4 起會自己找 plugin 落地位置，不再寫死路徑。）
+
+維護者若要在 CLI 端測試同一份程式碼，另有一條 marketplace 路徑：
 
 ```bash
 claude plugin marketplace add https://gitlab.nineder.com/nineder/claude/plugin.git
 claude plugin install redmine@nineder
 ```
 
-裝完**整個重啟** Claude Code（plugin 在行程啟動時載入，桌面版沒有 reload 指令），然後在
-對話裡輸入：
-
-```
-/redmine:setup
-```
-
-（v4.0.3 起提供。等效的手動做法是自己執行 `bash ~/.claude/plugins/marketplaces/nineder/redmine/scripts/bootstrap.sh`。）
+**這條路不要給一般成員**——repo 是 private，成員沒有讀取權，`marketplace add` 會失敗。
+兩套機制互不可見，詳見「兩條派發來源」一節。
 
 **這一步在桌面版不能省。** Claude Code 桌面版**不執行 plugin 宣告的任何 hook**——
 UserPromptSubmit 是已知的 parity gap（[#26559](https://redmine.nineder.com/issues/26559) v2.2、
@@ -41,6 +46,12 @@ issue_context.sh、SessionStart 指向 bootstrap.sh 自己）。跑過這一次�
 repo 是 private，第一次 clone 需要公司 GitLab（gitlab.nineder.com）帳號憑證。
 
 ## 從 v3.x 升上來
+
+組織派發的機器（多數成員）只要**整個重啟**，再輸入一次 `/redmine:setup`。
+新版何時到那台機器由組織端控制——若 Organization Settings 開著版本核准，新版會卡在
+「to review」直到管理員核准，成員端不論重啟幾次都拿不到。
+
+維護者的 CLI 端：
 
 ```bash
 claude plugin marketplace update nineder
@@ -66,8 +77,9 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 
 - `.claude-plugin/plugin.json` — plugin 資訊清單（**每次發佈都要把 version 往上推**，否則
   客戶端的更新檢查會跳過這一版）
-- `commands/setup.md` — `/redmine:setup`，v4.0.3 起。內容是「執行一次 bootstrap.sh 並轉述
-  結果，然後接手 `nineder-skill` 跑機器健檢」。**存在的理由**：桌面版不執行 plugin 宣告的
+- `commands/setup.md` — `/redmine:setup`，v4.0.3 起。內容是「找到並執行一次 bootstrap.sh 並
+  轉述結果，然後接手 `nineder-skill` 跑機器健檢」。v4.0.4 起帶一段搜尋（本 session 的
+  `CLAUDE_PLUGIN_ROOT` → CLI marketplace → 組織派發目錄 → 穩定副本），不再寫死路徑。**存在的理由**：桌面版不執行 plugin 宣告的
   hook，但**照常載入 plugin 的 commands 與 skills**，所以這是唯一能讓純桌面版使用者「打一個
   指令」就完成開機設定的路徑——不必貼一長串 bash 路徑，也不必開終端機。
   這是 plugin 內唯一的 command，**刻意不做成 skill**：它是一次性的操作入口，不是知識，
@@ -76,11 +88,15 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
   UserPromptSubmit：桌面版不執行 plugin 宣告的該 event，而 CLI 會，兩邊都宣告會重複注入。
   （桌面版連 SessionStart 也不執行，所以這個宣告實際上只服務 CLI；桌面版靠 bootstrap 寫進
   settings.json 的那條）
-- `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做四件事：
+- `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做五件事：
+  0. 把自己與 `issue_context.sh` 複製到 `~/.claude/nineder/bin/`（內容有變才複製）——
+     settings 的 hook 一律指向這份副本，理由見「兩條派發來源」
   1. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
-     plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）
-  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit 與 SessionStart 兩條**
-     （後者指向 bootstrap.sh 自己——這是純桌面版機器唯一跑得到 bootstrap 的路徑）
+     plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）。從穩定副本被呼叫時看不到
+     `seed/`，此時印一行「請輸入 `/redmine:setup`」而不是靜默
+  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit 與 SessionStart 兩條**，
+     兩條都指向 `~/.claude/nineder/bin/`（後者指向 bootstrap.sh 自己——這是純桌面版機器唯一
+     跑得到 bootstrap 的路徑）。舊版寫進去的 marketplace 路徑條目會一併換掉，不會變成重複條目
   3. 移除 v3.x 留下的 `~/.claude/commands/` 指標檔（redmine 四個＋google 兩個，只刪內容
      確實是指標檔的）
   4. 呼叫 `~/.claude/skills/nineder-skill/scripts/sync.sh --auto`
@@ -118,6 +134,30 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 - [#26915](https://redmine.nineder.com/issues/26915) — `/nineder-skill` 同步器
 - [#26825](https://redmine.nineder.com/issues/26825) — plugin 發佈規範與常見錯誤
 - [#26311](https://redmine.nineder.com/issues/26311) — `/redmine` 基本寫入準則（skill 內容已移至該票附檔）
+
+## 兩條派發來源（4.0.4 的成因）
+
+| 來源 | 落地位置 | `claude plugin list` 看得到嗎 |
+| --- | --- | --- |
+| 組織派發（多數成員） | `~/Library/Application Support/Claude/local-agent-mode-sessions/<session-id>/<sub-id>/rpm/plugin_<id>/` | **看不到** |
+| CLI marketplace（維護者） | `~/.claude/plugins/marketplaces/nineder/redmine/` | 看得到 |
+
+組織派發的路徑**含 session id，每次開對話都會變**，所以：
+
+1. **任何寫進 `~/.claude/settings.json` 的 plugin 絕對路徑，下次開對話就失效。**
+   4.0.3 以前寫死的是 CLI marketplace 路徑，在組織派發的機器上那個目錄根本不存在——
+   兩條 hook 都指向找不到的檔案，fail-open 不報錯，等於完全沒作用
+   （[#26915](https://redmine.nineder.com/issues/26915) note-27，張穎秦 jacob.chang 回報）
+2. 也不能改成「由 `CLAUDE_PLUGIN_ROOT` 推導」——那個值只在當下這個 session 正確，
+   寫進 settings 一樣過期
+
+所以 4.0.4 的解法是**穩定副本**：bootstrap 每次先把自己與 `issue_context.sh` 複製到
+`~/.claude/nineder/bin/`，settings 條目只認這個位置。兩種派發方式都成立，路徑永久有效，
+而 plugin 升版時新版 bootstrap（由 plugin 的 SessionStart 或 `/redmine:setup` 觸發）會自動
+把副本更新掉。
+
+判斷成員機器上的版本請一律用「`/redmine:setup` 打不打得出來」，**不要用 `claude plugin details`**
+——組織派發的 plugin 不在 CLI 的視野裡，會把能用的機器判成「沒裝」。
 
 ## 發佈與鏡像
 
