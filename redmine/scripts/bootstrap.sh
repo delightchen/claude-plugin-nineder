@@ -94,7 +94,10 @@ if [ -d "${CMDS}" ]; then
   for n in redmine redmine-feature-create redmine-bug redmine-bug-create nineder-google nineder-google-login; do
     f="${CMDS}/${n}.md"
     [ -f "${f}" ] || continue
-    if grep -q "plugin 的 \`${n}\` skill" "${f}" 2>/dev/null && grep -q "技能清單裡顯示為" "${f}" 2>/dev/null; then
+    # 判斷依據是 install_hotkeys.sh 產物的兩個特徵句，*不比對 skill 名* —— 4.0.1 拿檔名去
+    # 對內文的 skill 名，結果 nineder-google-login.md 沒被清掉：它的內文寫的是「使用 google
+    # plugin 的 nineder-google skill」，名稱與檔名不同（2026-09-07 實測）。
+    if grep -q "技能清單裡顯示為" "${f}" 2>/dev/null && grep -q "plugin 的 \`" "${f}" 2>/dev/null; then
       rm -f "${f}" 2>/dev/null && removed=$((removed + 1))
     fi
   done
