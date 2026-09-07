@@ -1,6 +1,6 @@
 # Redmine Plugin（分發模型 v2：bootstrap）
 
-耐德科技組織內部的 Claude Plugin。**v4.0.0 起本 plugin 不攜帶任何 skill** —— 公司 Skill 的
+耐德科技組織內部的 Claude Plugin。**v4.0.0 起本 plugin 不攜帶任何內容 skill**（v4.0.3 起有一個開機用的 `/redmine:setup` 指令） —— 公司 Skill 的
 內容正本是 Redmine Skill 票的附檔，由 `/nineder-skill` 同步到成員機器的
 `~/.claude/skills/`。plugin 只負責三件事：把同步器種下去、維護 UserPromptSubmit hook、
 每次 session 開始時觸發一次同步。
@@ -14,12 +14,14 @@ claude plugin marketplace add https://gitlab.nineder.com/nineder/claude/plugin.g
 claude plugin install redmine@nineder
 ```
 
-裝完**整個重啟** Claude Code（plugin 在行程啟動時載入，桌面版沒有 reload 指令），然後
-**手動執行一次** bootstrap：
+裝完**整個重啟** Claude Code（plugin 在行程啟動時載入，桌面版沒有 reload 指令），然後在
+對話裡輸入：
 
-```bash
-bash ~/.claude/plugins/marketplaces/nineder/redmine/scripts/bootstrap.sh
 ```
+/redmine:setup
+```
+
+（v4.0.3 起提供。等效的手動做法是自己執行 `bash ~/.claude/plugins/marketplaces/nineder/redmine/scripts/bootstrap.sh`。）
 
 **這一步在桌面版不能省。** Claude Code 桌面版**不執行 plugin 宣告的任何 hook**——
 UserPromptSubmit 是已知的 parity gap（[#26559](https://redmine.nineder.com/issues/26559) v2.2、
@@ -45,7 +47,7 @@ claude plugin marketplace update nineder
 claude plugin update redmine@nineder
 ```
 
-然後**整個重啟**，再**手動跑一次上面那行 bootstrap**（同樣不能省，理由見安裝段）。順序不能
+然後**整個重啟**，再輸入一次 `/redmine:setup`（同樣不能省，理由見安裝段）。順序不能
 反 —— 先更新、再重啟；反了等於重啟時載入舊版
 （[#26825](https://redmine.nineder.com/issues/26825) 常見錯誤表）。
 
@@ -64,8 +66,16 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 
 - `.claude-plugin/plugin.json` — plugin 資訊清單（**每次發佈都要把 version 往上推**，否則
   客戶端的更新檢查會跳過這一版）
+- `commands/setup.md` — `/redmine:setup`，v4.0.3 起。內容是「執行一次 bootstrap.sh 並轉述
+  結果，然後接手 `nineder-skill` 跑機器健檢」。**存在的理由**：桌面版不執行 plugin 宣告的
+  hook，但**照常載入 plugin 的 commands 與 skills**，所以這是唯一能讓純桌面版使用者「打一個
+  指令」就完成開機設定的路徑——不必貼一長串 bash 路徑，也不必開終端機。
+  這是 plugin 內唯一的 command，**刻意不做成 skill**：它是一次性的操作入口，不是知識，
+  而且不會與 `~/.claude/skills/` 的任何目錄同名打對台
 - `hooks/hooks.json` — 只宣告 SessionStart，指向 `scripts/bootstrap.sh`。刻意**不**宣告
-  UserPromptSubmit：桌面版不執行 plugin 宣告的該 event，而 CLI 會，兩邊都宣告會重複注入
+  UserPromptSubmit：桌面版不執行 plugin 宣告的該 event，而 CLI 會，兩邊都宣告會重複注入。
+  （桌面版連 SessionStart 也不執行，所以這個宣告實際上只服務 CLI；桌面版靠 bootstrap 寫進
+  settings.json 的那條）
 - `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做四件事：
   1. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
      plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）
@@ -97,7 +107,7 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 | 改什麼 | 走哪條路 |
 | --- | --- |
 | 任何 skill 的內容 | 改 Redmine Skill 票的附檔＋推票頭「現行版本」。成員端下次開對話自動同步，**不必發 plugin、不必重啟** |
-| `bootstrap.sh`、`issue_context.sh`、`hooks.json`、`seed/` | 走本 repo 的發佈流程，成員要先更新再完整重啟 |
+| `bootstrap.sh`、`issue_context.sh`、`hooks.json`、`commands/setup.md`、`seed/` | 走本 repo 的發佈流程，成員要先更新再完整重啟 |
 
 ## 規格治理（單一事實來源）
 
