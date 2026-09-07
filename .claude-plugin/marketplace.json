@@ -9,13 +9,7 @@
     {
       "name": "redmine",
       "source": "./redmine",
-      "description": "耐德科技 Redmine 技能組：/redmine 讀寫議題、redmine-feature 撰寫規範、/redmine-feature-create 互動建單、redmine-bug Bug 撰寫規範、/redmine-bug-create 互動建 Bug 單；含議題編號自動連結與 session 改名提醒 hook",
-      "category": "productivity"
-    },
-    {
-      "name": "google",
-      "source": "./google",
-      "description": "耐德科技 Google Workspace 技能組：/nineder_google 以個人 nineder.com 帳號讀取與修改 Google Docs、Sheets、Slides。服務端 mcp.nineder.com/google",
+      "description": "耐德科技 Redmine plugin（分發模型 v2 起為 bootstrap）：SessionStart 種下 /nineder-skill 同步器，把耐德集團工作區已核可的 Skill 自動裝到 ~/.claude/skills/ 並保持最新；另維護 UserPromptSubmit hook（議題編號與公司 GitLab 短路徑自動連結、session 改名提醒）。plugin 本身不攜帶 skill，內容正本在 Redmine Skill 票附檔。規格：#26309/#26559/#26915",
       "category": "productivity"
     }
   ]

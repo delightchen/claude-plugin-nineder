@@ -5,11 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/install_hotkeys.sh"
-          },
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/install_settings_hook.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.sh"
           }
         ]
       }

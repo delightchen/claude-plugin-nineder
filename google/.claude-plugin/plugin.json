@@ -1,8 +1,0 @@
-{
-  "name": "google",
-  "displayName": "Nineder Google Workspace",
-  "description": "耐德科技 Google Workspace 技能組：/nineder_google 以個人 nineder.com 帳號讀取與修改 Google Docs、Sheets、Slides。服務端為 mcp.nineder.com/google。規格議題：#26714",
-  "version": "0.1.0",
-  "author": { "name": "陳昶任 delight", "email": "delight@nineder.com" },
-  "homepage": "https://redmine.nineder.com/issues/26714"
-}
