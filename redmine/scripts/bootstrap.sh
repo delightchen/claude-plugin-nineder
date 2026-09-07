@@ -5,8 +5,10 @@
 # plugin 在 v2 之後只剩這一支入口，做四件事，順序固定：
 #   1. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全不碰，
 #      之後由 Redmine 附檔自我升版——plugin 永遠不覆寫已安裝的版本）
-#   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit 條目（承 #26559 v2.2：
-#      桌面版不執行 plugin 宣告的 UserPromptSubmit，settings 層才 CLI/Desktop 通用）
+#   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit *與 SessionStart* 兩條
+#      （承 #26559 v2.2 並於 v3.1 擴大：桌面版連 plugin 宣告的 SessionStart 都不執行，
+#      2026-09-07 實測確認 —— 所以本腳本必須把「呼叫自己」的 SessionStart 條目也寫進
+#      settings.json，否則 4.0.0 在純桌面版等於完全沒作用）
 #   3. 清舊：移除 v3.x 的 ~/.claude/commands/ 指標檔——它們指向 plugin 內已不存在的 skill
 #   4. sync：呼叫 ~/.claude/skills/nineder-skill/scripts/sync.sh --auto
 #
@@ -36,9 +38,13 @@ import json, os, tempfile
 
 home = os.path.expanduser("~")
 path = os.path.join(home, ".claude", "settings.json")
-marker = "marketplaces/nineder/redmine/scripts/issue_context.sh"
-cmd = ('SCRIPT="$HOME/.claude/plugins/marketplaces/nineder/redmine/scripts/issue_context.sh"; '
-       '[ -x "$SCRIPT" ] && exec "$SCRIPT"; exit 0')
+BASE = "$HOME/.claude/plugins/marketplaces/nineder/redmine/scripts/"
+
+# event -> 腳本檔名。兩條都由 settings 層派送：桌面版不執行 plugin 宣告的任何 hook
+# （UserPromptSubmit 見 #26559 v2.2；SessionStart 於 2026-09-07 實測確認），而 settings
+# 層 CLI 與桌面版皆適用且有 file watcher。SessionStart 指向本腳本自己 —— 這是純桌面版
+# 機器唯一跑得到 bootstrap 的路徑，所以第一次必須由人手動執行一次本腳本（見 README）。
+WANT = {"UserPromptSubmit": "issue_context.sh", "SessionStart": "bootstrap.sh"}
 
 try:
     with open(path) as f:
@@ -49,13 +55,19 @@ except Exception:
     raise SystemExit          # 讀不到或壞損：完全不碰
 
 hooks = data.setdefault("hooks", {})
-entries = hooks.get("UserPromptSubmit") or []
-ours = {"hooks": [{"type": "command", "command": cmd}]}
-kept = [e for e in entries if marker not in json.dumps(e)]
-wanted = kept + [ours]
-if wanted == entries:
-    raise SystemExit          # 已就位：不寫、不動 mtime
-hooks["UserPromptSubmit"] = wanted
+changed = False
+for event, script in WANT.items():
+    marker = "marketplaces/nineder/redmine/scripts/" + script
+    cmd = f'SCRIPT="{BASE}{script}"; [ -x "$SCRIPT" ] && exec "$SCRIPT"; exit 0'
+    entries = hooks.get(event) or []
+    ours = {"hooks": [{"type": "command", "command": cmd}]}
+    kept = [e for e in entries if marker not in json.dumps(e)]
+    wanted = kept + [ours]
+    if wanted != entries:
+        hooks[event] = wanted
+        changed = True
+if not changed:
+    raise SystemExit          # 兩條都已就位：不寫、不動 mtime
 
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings-", suffix=".json")
 try:
@@ -70,14 +82,16 @@ PY
 fi
 
 # ---- 3. 清掉 v3.x 的裸名指標檔 ----
-# v3.x 的 install_hotkeys.sh 在 ~/.claude/commands/ 寫了四個指標檔，內容是「使用 redmine
-# plugin 的 <名> skill」。v2 之後 plugin 不再攜帶 skill，這些指標會指向不存在的東西；而 skill
-# 住在 ~/.claude/skills/ 時裸名本來就可用，指標檔已無用途。
+# v3.x 的 install_hotkeys.sh 在 ~/.claude/commands/ 寫了指標檔（redmine 四個、google 兩個），
+# 內容是「使用 X plugin 的 X skill」。v2 之後 plugin 不再攜帶 skill，這些指標會指向不存在的
+# 東西；而 skill 住在 ~/.claude/skills/ 時裸名本來就可用，指標檔已無用途。google plugin 於
+# v2 整支廢除，它寫的兩個一併列入 —— 4.0.0 的清單漏了它們，兩個檔留在原地與同名 skill 打
+# 對台（2026-09-07 實測）。
 # 只刪內容確實是那個指標檔的（比對特徵字串），使用者自己寫的同名 command 一律不動。
 CMDS="${HOME}/.claude/commands"
 if [ -d "${CMDS}" ]; then
   removed=0
-  for n in redmine redmine-feature-create redmine-bug redmine-bug-create; do
+  for n in redmine redmine-feature-create redmine-bug redmine-bug-create nineder-google nineder-google-login; do
     f="${CMDS}/${n}.md"
     [ -f "${f}" ] || continue
     if grep -q "plugin 的 \`${n}\` skill" "${f}" 2>/dev/null && grep -q "技能清單裡顯示為" "${f}" 2>/dev/null; then

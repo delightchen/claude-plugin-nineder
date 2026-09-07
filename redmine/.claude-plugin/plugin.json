@@ -2,7 +2,7 @@
   "name": "redmine",
   "displayName": "Redmine Skill Plugin",
   "description": "耐德科技 Redmine plugin —— 分發模型 v2 起只剩 bootstrap：SessionStart 種下 /nineder-skill 同步器（#26915）、維護 UserPromptSubmit hook（議題編號與公司 GitLab 短路徑自動連結＋session 改名提醒，設 REDMINE_ISSUE_CONTEXT=0 停用）、呼叫同步器把耐德集團工作區已核可的 Skill 同步到 ~/.claude/skills/。plugin 本身不再攜帶任何 skill 或 command——內容正本在 Redmine Skill 票附檔。規格議題：#26309/#26559/#26915/#26937",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "author": {
     "name": "陳昶任 delight",
     "email": "delight@nineder.com"

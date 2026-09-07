@@ -14,9 +14,26 @@ claude plugin marketplace add https://gitlab.nineder.com/nineder/claude/plugin.g
 claude plugin install redmine@nineder
 ```
 
-裝完**整個重啟** Claude Code（plugin 在行程啟動時載入，桌面版沒有 reload 指令），然後開一個
-新對話輸入 `/nineder-skill`，它會帶你走完「機器健檢七格」：Redmine API key 鑰匙檔、兩個 MCP
-的註冊與登入、Skill 同步、Google 帳號綁定。人的操作手冊在
+裝完**整個重啟** Claude Code（plugin 在行程啟動時載入，桌面版沒有 reload 指令），然後
+**手動執行一次** bootstrap：
+
+```bash
+bash ~/.claude/plugins/marketplaces/nineder/redmine/scripts/bootstrap.sh
+```
+
+**這一步在桌面版不能省。** Claude Code 桌面版**不執行 plugin 宣告的任何 hook**——
+UserPromptSubmit 是已知的 parity gap（[#26559](https://redmine.nineder.com/issues/26559) v2.2、
+[anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)），
+SessionStart 於 2026-09-07 實測確認同樣不執行。而 `~/.claude/settings.json` 宣告的 hook
+兩邊都有效，所以上面這一行的用途就是**把兩條 settings 條目寫進去**（UserPromptSubmit 指向
+issue_context.sh、SessionStart 指向 bootstrap.sh 自己）。跑過這一次之後就全自動了——
+之後每次開新對話都由 settings 層的 SessionStart 觸發同步。
+
+（CLI 使用者跑 `claude` 時 plugin 的 SessionStart 會執行，等於自動完成這一步，但手動跑一次
+也不會有副作用——本腳本完全冪等。）
+
+接著開一個新對話輸入 `/nineder-skill`，它會帶你走完「機器健檢七格」：Redmine API key 鑰匙檔、
+兩個 MCP 的註冊與登入、Skill 同步、Google 帳號綁定。人的操作手冊在
 [耐德集團工作區 Wiki「Claude Code 新機器安裝」](https://redmine.nineder.com/projects/website_managfc/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D)。
 
 repo 是 private，第一次 clone 需要公司 GitLab（gitlab.nineder.com）帳號憑證。
@@ -28,14 +45,15 @@ claude plugin marketplace update nineder
 claude plugin update redmine@nineder
 ```
 
-然後**整個重啟**。順序不能反 —— 先更新、再重啟；反了等於重啟時載入舊版
+然後**整個重啟**，再**手動跑一次上面那行 bootstrap**（同樣不能省，理由見安裝段）。順序不能
+反 —— 先更新、再重啟；反了等於重啟時載入舊版
 （[#26825](https://redmine.nineder.com/issues/26825) 常見錯誤表）。
 
 升上來之後有三個可見的變化：
 
 1. 原本由 plugin 提供的五支 skill 改由 `~/.claude/skills/` 提供，內容相同、版本可能更新
-2. `~/.claude/commands/` 底下四個舊的裸名指標檔會被自動移除（skill 裝在使用者層級本來就以
-   裸名觸發，指標檔已無用途）；你自己寫的同名 command 不會被動
+2. `~/.claude/commands/` 底下六個舊的裸名指標檔會被自動移除（redmine 四個＋google 兩個；
+   skill 裝在使用者層級本來就以裸名觸發，指標檔已無用途）；你自己寫的同名 command 不會被動
 3. 第一次開對話會多一行提示，請你輸入 `/nineder-skill` 完成設定
 
 google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
@@ -51,8 +69,10 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 - `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做四件事：
   1. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
      plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）
-  2. 冪等維護 `~/.claude/settings.json` 的 UserPromptSubmit 條目
-  3. 移除 v3.x 留下的 `~/.claude/commands/` 四個指標檔（只刪內容確實是指標檔的）
+  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit 與 SessionStart 兩條**
+     （後者指向 bootstrap.sh 自己——這是純桌面版機器唯一跑得到 bootstrap 的路徑）
+  3. 移除 v3.x 留下的 `~/.claude/commands/` 指標檔（redmine 四個＋google 兩個，只刪內容
+     確實是指標檔的）
   4. 呼叫 `~/.claude/skills/nineder-skill/scripts/sync.sh --auto`
 
   兩條界線：**不碰 `~/.claude.json`、不做 `claude mcp add`**（主設定檔併發寫有風險，且 hook
