@@ -4,8 +4,10 @@
 # code 0 is added to context):
 #   1. Redmine issue refs (#NNNN or redmine.nineder.com/issues/NNNN, 4-6
 #      digits) -> number->URL table so replies always render the numbers as
-#      links (writing guideline #26311 rule 16), plus a reminder to rename the
-#      session per rule 21. Spec: https://redmine.nineder.com/issues/26559 (v2)
+#      links (writing guideline #26311 rule 16). Rule 21 renaming is injected
+#      ONLY on a session's first prompt; on every later prompt the note tells
+#      Claude explicitly NOT to rename (rule 21 as of guideline v7.15).
+#      Spec: https://redmine.nineder.com/issues/26559 (v2.3)
 #   2. GitLab repo short paths (namespace/repo, leading slash optional) whose
 #      first segment matches the company's top-level namespace allowlist ->
 #      path->URL candidates. The note tells Claude to link them only after
@@ -50,8 +52,9 @@ fi
 # First prompt of a brand-new session: the transcript file does not exist yet,
 # or holds no assistant message. Resumed sessions already have assistant lines
 # so they are never misjudged as new. If transcript_path is missing or
-# unreadable we fall back to the conditional wording (never misjudge, never
-# block) — spec #26559 v2.1.
+# unreadable we treat it as NOT the first turn, i.e. we tell Claude not to
+# rename — the conservative side now that mid-conversation renaming is banned
+# outright (never misjudge into an unwanted rename, never block) — #26559 v2.3.
 first_turn=0
 if [ -n "$transcript" ]; then
   if [ ! -f "$transcript" ]; then
@@ -102,7 +105,7 @@ if [ -n "$ids" ]; then
     printf '2. 第 21 條【強制】：本 session 是全新 session，且首則訊息含議題編號——不論該議題是否為本次任務對象，一律無條件先以 #%s get_issue 取得 subject，呼叫 ccd_session_mgmt 的 set_session_title（session_id 用 self）把 session 改名為「#%s subject」，改名完成後才開始處理任務；環境沒有該工具時靜默跳過，直接繼續任務。\n' "$1" "$1"
   else
     printf '%s\n' \
-      '2. 第 21 條：若其中的議題就是本次要處理的對象，開始執行前先以 get_issue 取得 subject，並呼叫 ccd_session_mgmt 的 set_session_title（session_id 用 self）把 session 改名為「#編號 subject」；環境沒有該工具時靜默跳過，直接繼續任務。'
+      '2. 第 21 條【不要改名】：這不是本 session 的首則訊息（或無法判定），一律不得更改 session 名稱——即使這則訊息貼了新的議題編號、或接下來會建立新議題，也不改。session 名稱只由第一則訊息決定。'
   fi
 fi
 
