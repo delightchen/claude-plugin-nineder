@@ -41,7 +41,7 @@ issue_context.sh、SessionStart 指向 bootstrap.sh 自己）。跑過這一次�
 
 接著開一個新對話輸入 `/nineder-skill`，它會帶你走完「機器健檢七格」：Redmine API key 鑰匙檔、
 兩個 MCP 的註冊與登入、Skill 同步、Google 帳號綁定。人的操作手冊在
-[耐德集團工作區 Wiki「Claude Code 新機器安裝」](https://redmine.nineder.com/projects/website_managfc/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D)。
+[耐德集團工作區 Wiki「Claude Code 新機器安裝」](https://redmine.nineder.com/projects/47/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D)。
 
 repo 是 private，第一次 clone 需要公司 GitLab（gitlab.nineder.com）帳號憑證。
 

@@ -3,7 +3,7 @@ name: nineder-skill
 description: 當使用者輸入 `/nineder-skill`，或說「這台機器怎麼裝公司的 Skill」「幫我設定 Redmine／Google 連線」「公司有哪些 Skill 我還沒裝」「我的 Skill 是不是舊了」「新機器要怎麼開始」時使用。本 skill 是公司 Skill 的單一來源同步器與新機器的唯一安裝入口：跑「機器健檢七格」（Redmine API key 鑰匙檔、兩個 MCP 的註冊與登入、Skill 同步、Google 帳號綁定），缺哪格補哪格；耐德集團工作區已核可（Resolved）的 Skill 由它自動裝進 ~/.claude/skills/ 並保持一致，其他專案的列出並給一列一支的安裝指令。只讀不寫 Redmine。要產出新 Skill 或升版是 /redmine-skill-create；要換綁 Google 帳號可直接用 /nineder-google-login。執行期間對使用者說的話一律繁體中文。
 ---
 
-> 版本：v1.1（2026-09-06）｜方法正本：Redmine #26915
+> 版本：v1.2（2026-09-08）｜方法正本：Redmine #26915
 
 # 公司 Skill 同步與機器健檢 (`/nineder-skill`)
 
@@ -17,7 +17,7 @@ description: 當使用者輸入 `/nineder-skill`，或說「這台機器怎麼�
 
 回覆中任何 Redmine 議題編號一律輸出成指向 `https://redmine.nineder.com/issues/編號` 的超連結
 （#26311 第 16 條）。人的操作手冊正本是耐德集團工作區 Wiki 頁「Claude Code 新機器安裝」
-（ https://redmine.nineder.com/projects/website_managfc/wiki/Claude_Code_新機器安裝 ），
+（ https://redmine.nineder.com/projects/47/wiki/Claude_Code_新機器安裝 ），
 健檢報告的頁首要附這個連結。
 
 ## 三條硬規則

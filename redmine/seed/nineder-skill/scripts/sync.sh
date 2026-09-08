@@ -14,8 +14,10 @@
 #   * 自動範圍：只有 AUTO_PROJECT_IDS（47 耐德集團工作區）的 Resolved 自動裝／更新／下架
 #   * 砍光同名：先下載並驗證通過，才整目錄刪除 ~/.claude/skills/<名稱>/ 再解開；驗證失敗一個位元組都不動
 #   * 不砍：名稱不在 47 集合裡的目錄、plugin cache、目前 project 的 .claude/skills（同名影子只警告）
-#   * 下架：47 的票不再是 Resolved → 搬到 ~/.claude/nineder/disabled/<名稱>.disabled-<日期>（不留在 skills/ 底下，
+#   * 下架：47 的票變成 Cancelled／Rejected → 搬到 ~/.claude/nineder/disabled/<名稱>.disabled-<日期>（不留在 skills/ 底下，
 #     因為留在那裡 Claude Code 會把它當成另一支 skill 載入）
+#   * 審查中不下架（#26915 驗收 15）：票從 Resolved 退回 In Progress 等非終結狀態時，本機不裝、不更新、不下架，
+#     維持上一個 Resolved 版本並印一行提示 —— 升版送審期間全員不該失去這支 skill
 #   * 開發保護：目錄裡有 .nineder-dev 標記檔 → 本腳本完全不碰該目錄，只在報告標「開發中」
 #   * 自我更新：本腳本自己也在 47 集合裡；整支邏輯包在 main() 裡，bash 會先讀完整個函式再執行，
 #     所以刪掉自己所在的目錄不影響這一次執行
@@ -32,6 +34,7 @@ BASE = 'https://redmine.nineder.com'
 AUTO_PROJECT_IDS = {47}                 # 耐德集團工作區。要開放第二個專案改這裡（並改 #26915）
 SKILL_TRACKER_ID = 13
 RESOLVED = 'Resolved'
+DISABLE_STATUSES = {'Cancelled', 'Rejected'}   # 只有這兩個狀態才下架；其餘非 Resolved 一律保留舊版（#26915 驗收 5 與 15）
 HOME = os.path.expanduser('~')
 SKILLS = os.path.join(HOME, '.claude', 'skills')
 STATE = os.path.join(HOME, '.claude', 'nineder')
@@ -39,7 +42,7 @@ KEY_FILE = os.path.join(STATE, 'redmine_api_key')
 LAST = os.path.join(STATE, 'last_sync.json')
 DISABLED = os.path.join(STATE, 'disabled')
 LOCK = os.path.join(STATE, '.sync.lock')
-WIKI = BASE + '/projects/website_managfc/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D'
+WIKI = BASE + '/projects/47/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D'
 SELF = 'nineder-skill'
 
 args = sys.argv[1:]
@@ -177,7 +180,7 @@ def main():
     key, ksrc = load_key()
     result = {'mode': mode, 'dry_run': dry, 'key': {'source': ksrc, 'valid': None}, 'wiki': WIKI,
               'mcp': {}, 'auto_project_ids': sorted(AUTO_PROJECT_IDS), 'auto': [], 'installed': [], 'updated': [], 'disabled': [],
-              'dev_skipped': [], 'ahead': [], 'failed': [], 'others': [], 'shadows': [], 'set47': [], 'local_other': [],
+              'dev_skipped': [], 'ahead': [], 'failed': [], 'others': [], 'shadows': [], 'set47': [], 'local_other': [], 'reviewing': [],
               'last_sync': None, 'error': None}
     # MCP 註冊狀態（只看檔案，不碰 MCP）
     try:
@@ -274,7 +277,7 @@ def main():
             entry['state'] = 'installed' if n not in local else 'updated'
             (result['installed'] if n not in local else result['updated']).append({**entry, 'file': note})
 
-        # ---- 47 下架：本機有、票不再 Resolved ----
+        # ---- 47 下架：本機有、票已 Cancelled／Rejected；其餘非 Resolved 只提示不動 ----
         for n, i in names47.items():
             if i['status']['name'] == RESOLVED or n not in local: continue
             if n == SELF:
@@ -283,6 +286,11 @@ def main():
                                          'reason': f'本 skill 的票 #{i["id"]} 現為 {i["status"]["name"]}，尚未核可；已安裝的版本保留不下架'})
                 continue
             if local[n]['dev']: result['dev_skipped'].append({'issue': i['id'], 'name': n, 'status': i['status']['name']}); continue
+            if i['status']['name'] not in DISABLE_STATUSES:
+                # 審查中／暫緩：保留上一個 Resolved 版本，一個位元組都不動（#26915 驗收 15）
+                result['reviewing'].append({'issue': i['id'], 'name': n, 'status': i['status']['name'],
+                                            'local': vs(local[n]['version'])})
+                continue
             src = os.path.join(SKILLS, n)
             dst = os.path.join(DISABLED, f'{n}.disabled-{datetime.date.today():%Y%m%d}')
             if not dry:
@@ -330,6 +338,8 @@ def main():
         if result['installed']: parts.append('已安裝 ' + '、'.join(f'{x["name"]} {x["remote"]}' for x in result['installed']))
         if result['updated']: parts.append('已更新 ' + '、'.join(f'{x["name"]} {x["local"]}→{x["remote"]}' for x in result['updated']))
         if parts: say('nineder-skill：' + ('[dry-run] ' if dry else '') + '；'.join(parts) + '（新開對話生效）')
+        for x in result['reviewing']:
+            say(f'nineder-skill：{x["name"]} 審查中（票 #{x["issue"]} 現為 {x["status"]}），本機維持 {x["local"]} 不動')
         for x in result['disabled']:
             say(f'nineder-skill：已停用 {x["name"]}（#{x["issue"]} 現為 {x["status"]}，已搬到 {x["moved_to"]}）')
         for x in result['failed']:
