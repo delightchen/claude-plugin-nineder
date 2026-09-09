@@ -52,7 +52,7 @@ Redmine API key 鑰匙檔、兩個 MCP 的註冊與登入、Skill 同步、Googl
 
 `nineder-skill` 是這一次剛被種下去的，**同一個 session 內可能還載入不到**。呼叫不到時不要硬試，
 直接告訴使用者：「啟動設定已完成，請**新開一個對話**輸入 `/nineder-skill` 完成剩下的設定」，
-並附上手冊連結 https://redmine.nineder.com/projects/website_managfc/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D
+並附上手冊連結 https://redmine.nineder.com/projects/47/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D
 
 ## 邊界
 
