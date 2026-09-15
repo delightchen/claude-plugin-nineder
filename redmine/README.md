@@ -2,8 +2,8 @@
 
 耐德科技組織內部的 Claude Plugin。**v4.0.0 起本 plugin 不攜帶任何內容 skill**（v4.0.3 起有一個開機用的 `/redmine:setup` 指令） —— 公司 Skill 的
 內容正本是 Redmine Skill 票的附檔，由 `/nineder-skill` 同步到成員機器的
-`~/.claude/skills/`。plugin 只負責三件事：把同步器種下去、維護 settings 層的兩條 hook、
-每次 session 開始時觸發一次同步。
+`~/.claude/skills/`。plugin 只負責三件事：把同步器種下去、維護 settings 層的 hook
+（UserPromptSubmit、SessionStart、v4.0.7 起加上 PreToolUse 自動夾帳）、每次 session 開始時觸發一次同步。
 
 規範正本：[#26309](https://redmine.nineder.com/issues/26309) 附加資訊【分發模型 v2】。
 
@@ -89,14 +89,17 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
   （桌面版連 SessionStart 也不執行，所以這個宣告實際上只服務 CLI；桌面版靠 bootstrap 寫進
   settings.json 的那條）
 - `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做五件事：
-  0. 把自己與 `issue_context.sh` 複製到 `~/.claude/nineder/bin/`（內容有變才複製）——
-     settings 的 hook 一律指向這份副本，理由見「兩條派發來源」
+  0. 把自己、`issue_context.sh`、`ai_usage_inline.py`、`collect.py` 複製到
+     `~/.claude/nineder/bin/`（內容有變才複製）——settings 的 hook 一律指向這份副本，
+     理由見「兩條派發來源」
   1. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
      plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）。從穩定副本被呼叫時看不到
      `seed/`，此時印一行「請輸入 `/redmine:setup`」而不是靜默
-  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit 與 SessionStart 兩條**，
-     兩條都指向 `~/.claude/nineder/bin/`（後者指向 bootstrap.sh 自己——這是純桌面版機器唯一
-     跑得到 bootstrap 的路徑）。舊版寫進去的 marketplace 路徑條目會一併換掉，不會變成重複條目
+  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit、SessionStart，以及
+     PreToolUse 的 create_issue／update_issue 兩條**（v4.0.7 起，[#27113](https://redmine.nineder.com/issues/27113)），
+     全部指向 `~/.claude/nineder/bin/`（SessionStart 指向 bootstrap.sh 自己——這是純桌面版
+     機器唯一跑得到 bootstrap 的路徑）。舊版寫進去的 marketplace 路徑條目會一併換掉，不會
+     變成重複條目；PreToolUse 兩條各自的 matcher 分開比對，不會互相清掉
   3. 移除 v3.x 留下的 `~/.claude/commands/` 指標檔（redmine 四個＋google 兩個，只刪內容
      確實是指標檔的）
   4. 呼叫 `~/.claude/skills/nineder-skill/scripts/sync.sh --auto`
@@ -113,6 +116,18 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
   候選，由 Claude 依上下文確認真的是 repo 才輸出（第 19 條，寧可漏連不可錯連；`/Users/...`
   這類檔案路徑不會觸發）。不開啟任何頁面；預設啟用，設 `REDMINE_ISSUE_CONTEXT=0` 停用；
   fail-open。
+- `scripts/ai_usage_inline.py` — PreToolUse hook（[#27113](https://redmine.nineder.com/issues/27113)）：MCP 呼叫
+  `create_issue`／`update_issue` 之前，自動跑同目錄下的 `collect.py --pending`，把結果塞進
+  `ai_usage` 參數，取代「記得先跑 --pending 再貼參數」——正式站實測 1,287 次 MCP 寫入只有
+  16 次帶了用量，正是那個「記得」失效的證據。已經自己帶 `ai_usage` 的呼叫不覆蓋；找不到
+  `collect.py`、逾時、任何例外，或採集器回 `pending:false`，一律安靜放行原始寫入，不擋下
+  使用者的寫入、不補零。
+- `scripts/collect.py` — AI 用量採集器本體，`ai_usage_inline.py` 用 subprocess 呼叫的那一支。
+  與 GitLab `nineder/redmine/plugin/issue_provenance` 的 `collector/collect.py` 是同一份邏輯
+  （非公開發行版本，此份保留內部端點與預設值），改動需要在兩邊同步，但**不必為此發 plugin
+  新版** —— 只有 `ai_usage_inline.py` 找不到 `collect.py` 時的行為（fail-open）跟 plugin 有關；
+  `collect.py` 本身的計算邏輯改動走 issue_provenance 那個 repo 自己的部署流程，plugin 這份只是
+  搭 PreToolUse 便車的最新副本，下次 plugin 發版時才會更新
 - `seed/nineder-skill/` — 同步器的種子副本（`SKILL.md` ＋ `scripts/sync.sh`）。**刻意不放在
   `skills/` 底下**，這樣 plugin 機制不會把它當 skill 載入，成員機器上就只會有
   `~/.claude/skills/nineder-skill/` 一份。種子只在全新機器用得到，之後由 Redmine 附檔
@@ -123,7 +138,8 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 | 改什麼 | 走哪條路 |
 | --- | --- |
 | 任何 skill 的內容 | 改 Redmine Skill 票的附檔＋推票頭「現行版本」。成員端下次開對話自動同步，**不必發 plugin、不必重啟** |
-| `bootstrap.sh`、`issue_context.sh`、`hooks.json`、`commands/setup.md`、`seed/` | 走本 repo 的發佈流程，成員要先更新再完整重啟 |
+| `collect.py` 的計算邏輯（採集器本體） | 走 GitLab `nineder/redmine/plugin/issue_provenance` 自己的部署流程；這裡的副本只在下次 plugin 發版時才會跟著更新，不必為了同步這一份而特地發版 |
+| `bootstrap.sh`、`issue_context.sh`、`ai_usage_inline.py`、`hooks.json`、`commands/setup.md`、`seed/` | 走本 repo 的發佈流程，成員要先更新再完整重啟 |
 
 ## 規格治理（單一事實來源）
 
