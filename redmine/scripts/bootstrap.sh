@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# redmine plugin 4.0.4 —— SessionStart bootstrap（分發模型 v2）
-# 規格正本：Redmine #26559（v3.3）；分發模型：#26309【分發模型 v2】；同步器：#26915
+# redmine plugin 4.0.7 —— SessionStart bootstrap（分發模型 v2）
+# 規格正本：Redmine #26559（v3.3）；分發模型：#26309【分發模型 v2】；同步器：#26915；
+# 自動夾帳：#27113（#27090 的手動觸發 skill 衍生出來的裝機步驟）
 #
 # plugin 在 v2 之後只剩這一支入口，做五件事，順序固定：
-#   0. 把 hook 需要的兩支腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
+#   0. 把 hook 需要的四支腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
 #   1. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全不碰，
 #      之後由 Redmine 附檔自我升版——plugin 永遠不覆寫已安裝的版本）
-#   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit *與 SessionStart* 兩條
-#      （承 #26559 v2.2 並於 v3.1 擴大：桌面版連 plugin 宣告的 SessionStart 都不執行，
-#      2026-09-07 實測確認 —— 所以本腳本必須把「呼叫自己」的 SessionStart 條目也寫進
+#   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit、SessionStart，
+#      以及 PreToolUse 的 create_issue／update_issue 兩條自動夾帳 hook
+#      （承 #26559 v2.2 並於 v3.1 擴大：桌面版連 plugin 宣告的 hook 都不執行，
+#      2026-09-07 實測確認 —— 所以本腳本必須把「呼叫自己」的條目也寫進
 #      settings.json，否則 4.0.0 在純桌面版等於完全沒作用）
 #   3. 清舊：移除 v3.x 的 ~/.claude/commands/ 指標檔——它們指向 plugin 內已不存在的 skill
 #   4. sync：呼叫 ~/.claude/skills/nineder-skill/scripts/sync.sh --auto
@@ -32,14 +34,18 @@ STABLE_BIN="${HOME}/.claude/nineder/bin"
 # 這個路徑 *含 session id、每次開對話都會變* ，任何寫進 settings.json 的絕對路徑下次就失效。
 # 而 v4.0.3 以前寫死的是 CLI marketplace 路徑，組織派發的機器上那個目錄根本不存在 ——
 # 兩條 hook 於是都指向找不到的檔案（fail-open 不會報錯，但等於完全沒作用）。
-# 解法：把兩支腳本複製到 ~/.claude/nineder/bin/，settings 條目一律指向這裡 ——
+# 解法：把腳本複製到 ~/.claude/nineder/bin/，settings 條目一律指向這裡 ——
 # 兩種派發方式都成立，而且路徑穩定。內容有變才複製，重複執行不動 mtime。
+# ai_usage_inline.py／collect.py 兩支是 4.0.7 新增：前者是 PreToolUse hook 本體，
+# 後者是它會用 subprocess 呼叫的採集器，兩支必須一起在，缺一支 ai_usage_inline.py
+# 會 fail-open 直接放行原始寫入（見該檔 COLLECTOR 判斷）。
 copied=0
 if [ -f "${PLUGIN_ROOT}/scripts/bootstrap.sh" ] && [ -f "${PLUGIN_ROOT}/scripts/issue_context.sh" ]; then
   if mkdir -p "${STABLE_BIN}" 2>/dev/null; then
-    for f in bootstrap.sh issue_context.sh; do
+    for f in bootstrap.sh issue_context.sh ai_usage_inline.py collect.py; do
       src="${PLUGIN_ROOT}/scripts/${f}"
       dst="${STABLE_BIN}/${f}"
+      [ -f "${src}" ] || continue
       if ! cmp -s "${src}" "${dst}" 2>/dev/null; then
         cp "${src}" "${dst}" 2>/dev/null && chmod +x "${dst}" 2>/dev/null && copied=$((copied + 1))
       fi
@@ -62,7 +68,8 @@ if [ ! -e "${SELF_SKILL}" ]; then
   fi
 fi
 
-# ---- 2. settings.json 的 UserPromptSubmit（承 #26559 v2.2 的 install_settings_hook.sh）----
+# ---- 2. settings.json 的 UserPromptSubmit／SessionStart／PreToolUse（承 #26559 v2.2 的
+#         install_settings_hook.sh，4.0.7 加入 PreToolUse 自動夾帳，見 #27113）----
 if command -v python3 >/dev/null 2>&1; then
 python3 - <<'PY' 2>/dev/null || true
 import json, os, tempfile
@@ -71,13 +78,22 @@ home = os.path.expanduser("~")
 path = os.path.join(home, ".claude", "settings.json")
 BASE = "$HOME/.claude/nineder/bin/"
 
-# event -> 腳本檔名。兩條都由 settings 層派送：桌面版不執行 plugin 宣告的任何 hook
-# （UserPromptSubmit 見 #26559 v2.2；SessionStart 於 2026-09-07 實測確認），而 settings
-# 層 CLI 與桌面版皆適用且有 file watcher。SessionStart 指向本腳本自己 —— 這是純桌面版
-# 機器唯一跑得到 bootstrap 的路徑，所以第一次必須由人手動執行一次本腳本（見 README）。
+# event -> 腳本檔名。都由 settings 層派送：桌面版不執行 plugin 宣告的任何 hook
+# （UserPromptSubmit 見 #26559 v2.2；SessionStart 於 2026-09-07 實測確認；PreToolUse
+# 同一個限制，2026-09-15 隨 #27113 一併確認），而 settings 層 CLI 與桌面版皆適用且有
+# file watcher。SessionStart 指向本腳本自己 —— 這是純桌面版機器唯一跑得到 bootstrap
+# 的路徑，所以第一次必須由人手動執行一次本腳本（見 README）。
 # 路徑指向 ~/.claude/nineder/bin/（第 0 步複製過去的副本）， *不是* plugin 目錄 ——
 # 組織派發的 plugin 路徑含 session id、每次都變，寫進 settings.json 下次就失效。
 WANT = {"UserPromptSubmit": "issue_context.sh", "SessionStart": "bootstrap.sh"}
+
+# PreToolUse 跟上面不一樣：需要 matcher 指定攔哪個工具，一支腳本要掛在兩個 matcher
+# 上（create_issue 與 update_issue）。ai_usage_inline.py 本身找不到就 fail-open，
+# 不影響既有行為，所以晚一版才裝的人也不會被這一步卡住。
+WANT_MATCHED = [
+    ("PreToolUse", "mcp__nineder-redmine__create_issue", "ai_usage_inline.py"),
+    ("PreToolUse", "mcp__nineder-redmine__update_issue", "ai_usage_inline.py"),
+]
 
 try:
     with open(path) as f:
@@ -104,8 +120,26 @@ for event, script in WANT.items():
     if wanted != entries:
         hooks[event] = wanted
         changed = True
+
+for event, matcher, script in WANT_MATCHED:
+    # 這裡直接呼叫 python3 執行 .py 檔，不走上面那種 shell 轉接殼——PreToolUse 的
+    # command 本來就是任意指令，不需要「找不到就 exit 0」那層，腳本自己已經是
+    # fail-open（找不到 collect.py 或任何例外都直接放行）。
+    cmd = f'python3 {BASE}{script}'
+    markers = ("nineder/bin/" + script,)
+    entries = hooks.get(event) or []
+    ours = {"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]}
+    # 用 matcher 也一起認，避免不同 matcher 的條目互相清掉——上面的 markers 只認腳本
+    # 名，這裡同一支腳本掛在兩個 matcher 上，必須連 matcher 一起比對才不會誤刪。
+    kept = [e for e in entries
+            if not (e.get("matcher") == matcher and any(m in json.dumps(e) for m in markers))]
+    wanted = kept + [ours]
+    if wanted != entries:
+        hooks[event] = wanted
+        changed = True
+
 if not changed:
-    raise SystemExit          # 兩條都已就位：不寫、不動 mtime
+    raise SystemExit          # 全部都已就位：不寫、不動 mtime
 
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings-", suffix=".json")
 try:
