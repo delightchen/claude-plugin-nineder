@@ -1,8 +1,8 @@
 {
   "name": "redmine",
   "displayName": "Redmine Skill Plugin",
-  "description": "耐德科技 Redmine plugin —— 分發模型 v2 起只剩 bootstrap：SessionStart 種下 /nineder-skill 同步器（#26915）、維護 UserPromptSubmit hook（議題編號與公司 GitLab 短路徑自動連結＋session 改名提醒，設 REDMINE_ISSUE_CONTEXT=0 停用）、維護 PreToolUse hook（MCP 寫入 Redmine 議題時自動夾帶 AI 用量，#27113）、維護 SessionStart 每日用量排程與 PostToolUse 的議題轉 Resolved 排程（#27090）、呼叫同步器把耐德集團工作區已核可的 Skill 同步到 ~/.claude/skills/、每次執行都印出目前套件版號與版號日期讓使用者自行核對是否為最新（4.0.9 新增）。plugin 本身不攜帶任何內容 skill，只有一個 /redmine:setup 開機指令——內容正本在 Redmine Skill 票附檔。目前只在 macOS／Linux／WSL 驗證過，原生 Windows 尚未支援。規格議題：#26309/#26559/#26915/#26937/#27113/#27090",
-  "version": "4.0.9",
+  "description": "耐德科技 Redmine plugin —— 分發模型 v2 起只剩 bootstrap：SessionStart 種下 /nineder-skill 同步器（#26915）、維護 UserPromptSubmit hook（議題編號與公司 GitLab 短路徑自動連結＋session 改名提醒，設 REDMINE_ISSUE_CONTEXT=0 停用）、維護 PreToolUse hook（MCP 寫入 Redmine 議題時自動夾帶 AI 用量，#27113）、維護 SessionStart 每日用量排程與 PostToolUse 的議題轉 Resolved 排程（#27090）、呼叫同步器把耐德集團工作區已核可的 Skill 同步到 ~/.claude/skills/、每次執行都印出目前套件版號與版號日期讓使用者自行核對是否為最新（4.0.9 新增）。4.1.0 起 bootstrap 主體改寫成純 Python（bootstrap.py，不含任何殼層語法），settings.json 裡的 hook 指令一律用同目錄的 run_if_exists.py 轉接，初步讓 SessionStart 每日排程與 PreToolUse／PostToolUse 自動夾帳理論上可以在原生 Windows 上運作——*尚未經真實 Windows 機器驗證*；bootstrap.sh 現在只是呼叫 bootstrap.py 的 POSIX 轉接殼，issue_context.sh 與 nineder-skill 的 sync.sh 仍是純 bash，原生 Windows 上這兩者、以及首次執行 /redmine:setup 本身，暫時仍需要透過 WSL 或手動執行 bootstrap.py。plugin 本身不攜帶任何內容 skill，只有一個 /redmine:setup 開機指令——內容正本在 Redmine Skill 票附檔。規格議題：#26309/#26559/#26915/#26937/#27113/#27090/#27127",
+  "version": "4.1.0",
   "versionDate": "2026-09-16",
   "author": {
     "name": "陳昶任 delight",
