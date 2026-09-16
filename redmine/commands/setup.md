@@ -32,13 +32,16 @@ plugin 有兩條派發來源，落地位置完全不同——CLI marketplace 在
 CLI marketplace → 組織派發（以 `seed/nineder-skill` 認出是哪一個 plugin，取最新的）→
 最後才退回 `~/.claude/nineder/bin/` 的穩定副本。
 
-bootstrap 會做五件事，全部冪等：把自己與 `issue_context.sh` 複製到
+bootstrap 每次都會先印一行**版本自報**：`nineder-skill：目前 Redmine plugin 版本 vX.Y.Z（版號日期）`
+（4.0.9 新增）——這是使用者判斷「這台機器是不是最新版」唯一該看的地方，不用去讀 plugin.json。
+接著做六件事，全部冪等：把自己與 `issue_context.sh` 複製到
 `~/.claude/nineder/bin/`（settings 的 hook 一律指向這裡，路徑才穩定）、把 `/nineder-skill`
-同步器種進 `~/.claude/skills/`（已存在就不碰）、把兩條 hook 條目寫進
-`~/.claude/settings.json`（UserPromptSubmit 與 SessionStart——這是純桌面版機器唯一跑得到
-bootstrap 的路徑）、移除 v3.x 留下的舊指標檔、跑一次 Skill 同步。
+同步器種進 `~/.claude/skills/`（已存在就不碰）、把 hook 條目寫進
+`~/.claude/settings.json`（UserPromptSubmit、SessionStart、PreToolUse、PostToolUse——這是純
+桌面版機器唯一跑得到 bootstrap 的路徑）、移除 v3.x 留下的舊指標檔、跑一次 Skill 同步。
 
-**把它印出的每一行逐字轉述給使用者。** 什麼都沒印也要說明：那代表這台機器已經設好了，不是失敗。
+**把它印出的每一行逐字轉述給使用者，版本自報那行尤其不能省略或改寫。** 除了版本自報那一行，
+其餘什麼都沒印也要說明：那代表這台機器已經設好了，不是失敗。
 
 印出 `NOT_FOUND` 的話，代表這台機器上找不到任何一份 plugin 檔案。請使用者**整個結束
 Claude Code 再打開**（不是只關視窗）後重跑一次 `/redmine:setup`；仍然找不到就請他聯絡系統整合部

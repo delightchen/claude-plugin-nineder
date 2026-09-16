@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# redmine plugin 4.0.8 —— SessionStart bootstrap（分發模型 v2）
+# redmine plugin 4.0.9 —— SessionStart bootstrap（分發模型 v2）
 # 規格正本：Redmine #26559（v3.3）；分發模型：#26309【分發模型 v2】；同步器：#26915；
 # 自動夾帳：#27113；用量排程（daily_trigger／resolved_trigger）：#27090
 #
@@ -9,18 +9,21 @@
 # 原生 Windows 的 shell 執行不了；不要假設裝了這個 plugin 就代表 Windows
 # 機器上的排程也在跑，那件事還沒有人做。
 #
-# plugin 在 v2 之後只剩這一支入口，做五件事，順序固定：
-#   0. 把 hook 需要的腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
-#   1. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全不碰，
+# plugin 在 v2 之後只剩這一支入口，做六件事，順序固定：
+#   0. 版本自報：印出目前 plugin.json 的 version／versionDate，不管其餘五步有沒有變動都印
+#      （4.0.9 新增——這一整個 session 花了很久才查出「這台機器到底是不是最新版」，起因是
+#      使用者完全看不出來自己跑到的 bootstrap.sh 是哪個版本；印出來讓人一眼比對）
+#   1. 把 hook 需要的腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
+#   2. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全不碰，
 #      之後由 Redmine 附檔自我升版——plugin 永遠不覆寫已安裝的版本）
-#   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit、SessionStart，
+#   3. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit、SessionStart，
 #      PreToolUse 的 create_issue／update_issue 自動夾帳，以及 SessionStart 的每日
 #      用量排程、PostToolUse 的議題轉 Resolved 排程（4.0.8 新增，見 #27090）
 #      （承 #26559 v2.2 並於 v3.1 擴大：桌面版連 plugin 宣告的 hook 都不執行，
 #      2026-09-07 實測確認 —— 所以本腳本必須把「呼叫自己」的條目也寫進
 #      settings.json，否則 4.0.0 在純桌面版等於完全沒作用）
-#   3. 清舊：移除 v3.x 的 ~/.claude/commands/ 指標檔——它們指向 plugin 內已不存在的 skill
-#   4. sync：呼叫 ~/.claude/skills/nineder-skill/scripts/sync.sh --auto
+#   4. 清舊：移除 v3.x 的 ~/.claude/commands/ 指標檔——它們指向 plugin 內已不存在的 skill
+#   5. sync：呼叫 ~/.claude/skills/nineder-skill/scripts/sync.sh --auto
 #
 # 三條不可放寬的界線：
 #   * 不碰 ~/.claude.json —— 那是 Claude Code 頻繁寫入的主設定檔，SessionStart 併發寫有風險；
@@ -34,7 +37,24 @@ SKILLS="${HOME}/.claude/skills"
 SELF_SKILL="${SKILLS}/nineder-skill"
 STABLE_BIN="${HOME}/.claude/nineder/bin"
 
-# ---- 0. 把 hook 需要的腳本複製到穩定位置 ----
+# ---- 0. 版本自報（4.0.9 新增）----
+# 每次執行都印，不看其餘步驟有沒有異動——使用者才能一眼比對「我現在跑到的是不是最新」，
+# 不用再去讀 plugin.json 或問人。versionDate 是版號被合進 main 的日期，不是安裝日期。
+if [ -f "${PLUGIN_ROOT}/.claude-plugin/plugin.json" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "${PLUGIN_ROOT}/.claude-plugin/plugin.json" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    ver = d.get("version", "?")
+    date = d.get("versionDate", "版號日期未標")
+    print(f"nineder-skill：目前 Redmine plugin 版本 v{ver}（{date}）")
+except Exception:
+    pass
+PY
+fi
+
+# ---- 1. 把 hook 需要的腳本複製到穩定位置 ----
 # 為什麼 settings.json 不能直接指向 plugin 目錄（#26915 note-27，2026-09-07 實測）：
 # 組織派發的 plugin 放在
 #   ~/Library/Application Support/Claude/local-agent-mode-sessions/<session-id>/…/plugin_<id>/
@@ -62,7 +82,7 @@ if [ -f "${PLUGIN_ROOT}/scripts/bootstrap.sh" ] && [ -f "${PLUGIN_ROOT}/scripts/
 fi
 [ "${copied}" -gt 0 ] && echo "nineder-skill：已更新 ${copied} 支開機腳本到 ~/.claude/nineder/bin/"
 
-# ---- 1. seed ----
+# ---- 2. seed ----
 if [ ! -e "${SELF_SKILL}" ]; then
   if [ -d "${PLUGIN_ROOT}/seed/nineder-skill" ]; then
     if mkdir -p "${SKILLS}" 2>/dev/null && cp -R "${PLUGIN_ROOT}/seed/nineder-skill" "${SELF_SKILL}" 2>/dev/null; then
@@ -76,7 +96,7 @@ if [ ! -e "${SELF_SKILL}" ]; then
   fi
 fi
 
-# ---- 2. settings.json 的 UserPromptSubmit／SessionStart／PreToolUse／PostToolUse
+# ---- 3. settings.json 的 UserPromptSubmit／SessionStart／PreToolUse／PostToolUse
 #         （承 #26559 v2.2 的 install_settings_hook.sh；4.0.7 加入 PreToolUse 自動夾帳
 #         #27113；4.0.8 加入 SessionStart 每日排程與 PostToolUse 的 Resolved 排程 #27090）----
 if command -v python3 >/dev/null 2>&1; then
@@ -173,7 +193,7 @@ except Exception:
 PY
 fi
 
-# ---- 3. 清掉 v3.x 的裸名指標檔 ----
+# ---- 4. 清掉 v3.x 的裸名指標檔 ----
 # v3.x 的 install_hotkeys.sh 在 ~/.claude/commands/ 寫了指標檔（redmine 四個、google 兩個），
 # 內容是「使用 X plugin 的 X skill」。v2 之後 plugin 不再攜帶 skill，這些指標會指向不存在的
 # 東西；而 skill 住在 ~/.claude/skills/ 時裸名本來就可用，指標檔已無用途。google plugin 於
@@ -196,7 +216,7 @@ if [ -d "${CMDS}" ]; then
   [ "${removed}" -gt 0 ] && echo "nineder-skill：已移除 ${removed} 個舊版 plugin 指標檔（~/.claude/commands/），skill 現在直接以裸名提供。"
 fi
 
-# ---- 4. 同步 ----
+# ---- 5. 同步 ----
 SYNC="${SELF_SKILL}/scripts/sync.sh"
 [ -x "${SYNC}" ] && bash "${SYNC}" --auto 2>/dev/null
 
