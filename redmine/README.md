@@ -88,18 +88,25 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
   UserPromptSubmit：桌面版不執行 plugin 宣告的該 event，而 CLI 會，兩邊都宣告會重複注入。
   （桌面版連 SessionStart 也不執行，所以這個宣告實際上只服務 CLI；桌面版靠 bootstrap 寫進
   settings.json 的那條）
-- `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做五件事：
-  0. 把自己、`issue_context.sh`、`ai_usage_inline.py`、`collect.py` 複製到
-     `~/.claude/nineder/bin/`（內容有變才複製）——settings 的 hook 一律指向這份副本，
-     理由見「兩條派發來源」
+- `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做五件事。**目前只在
+  macOS／Linux／WSL 上驗證過**（bash 腳本，原生 Windows 的殼層執行不了；即使能
+  執行，`collect.py` 以外的部分也從沒在 Windows 上測過）：
+  0. 把自己、`issue_context.sh`、`ai_usage_inline.py`、`collect.py`、`daily_trigger.py`、
+     `resolved_trigger.py` 複製到 `~/.claude/nineder/bin/`（內容有變才複製）——settings
+     的 hook 一律指向這份副本，理由見「兩條派發來源」
   1. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
      plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）。從穩定副本被呼叫時看不到
      `seed/`，此時印一行「請輸入 `/redmine:setup`」而不是靜默
-  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit、SessionStart，以及
-     PreToolUse 的 create_issue／update_issue 兩條**（v4.0.7 起，[#27113](https://redmine.nineder.com/issues/27113)），
-     全部指向 `~/.claude/nineder/bin/`（SessionStart 指向 bootstrap.sh 自己——這是純桌面版
-     機器唯一跑得到 bootstrap 的路徑）。舊版寫進去的 marketplace 路徑條目會一併換掉，不會
-     變成重複條目；PreToolUse 兩條各自的 matcher 分開比對，不會互相清掉
+  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit、SessionStart（bootstrap.sh
+     自己＋每日用量排程 daily_trigger.py）、PreToolUse 的 create_issue／update_issue 自動
+     夾帳，以及 PostToolUse 的議題轉 Resolved 排程**（PreToolUse 見 v4.0.7、
+     [#27113](https://redmine.nineder.com/issues/27113)；SessionStart 第二條與 PostToolUse 見 v4.0.8、
+     [#27090](https://redmine.nineder.com/issues/27090)），全部指向 `~/.claude/nineder/bin/`。舊版寫進去的
+     marketplace 路徑條目會一併換掉，不會變成重複條目；有 matcher 的條目連 matcher 一起
+     比對，不會互相清掉。**已知殘留**：在 4.0.8 之前手動把 `daily_trigger.py`／
+     `resolved_trigger.py` 加進自己 `settings.json` 的機器（本文撰寫時只有維護者自己這台），
+     舊的手動條目不會被自動辨識、也不會被清掉，會跟新裝的穩定路徑版本並存，變成同一支腳本
+     被觸發兩次——不會出錯（`collect.py` 的鎖會擋下其中一次），但要手動清舊的那條才乾淨
   3. 移除 v3.x 留下的 `~/.claude/commands/` 指標檔（redmine 四個＋google 兩個，只刪內容
      確實是指標檔的）
   4. 呼叫 `~/.claude/skills/nineder-skill/scripts/sync.sh --auto`
@@ -128,6 +135,19 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
   新版** —— 只有 `ai_usage_inline.py` 找不到 `collect.py` 時的行為（fail-open）跟 plugin 有關；
   `collect.py` 本身的計算邏輯改動走 issue_provenance 那個 repo 自己的部署流程，plugin 這份只是
   搭 PreToolUse 便車的最新副本，下次 plugin 發版時才會更新
+- `scripts/daily_trigger.py` — SessionStart hook（[#27090](https://redmine.nineder.com/issues/27090)）：每天第一個 session
+  啟動時，背景補跑一次同目錄下的 `collect.py`。只負責「今天觸發過一次」的判斷（一個記
+  日期的標記檔），失敗與否交給 `collect.py` 自己的執行紀錄；fail-open，找不到
+  `collect.py` 就什麼都不做，永遠不擋下 session 開始。
+- `scripts/resolved_trigger.py` — PostToolUse hook（[#27090](https://redmine.nineder.com/issues/27090)，只攔
+  `update_issue`）：議題被推到 Resolved 的當下，背景補跑一次 `collect.py`，把還沒歸帳
+  的用量收一次。2026-09-16 之前這支解析 `tool_response` 的邏輯跟實際格式不符，兩次真實
+  觸發全部誤判為沒有 usage（已修好並用真實案例重放驗證，見 `test_resolved_trigger.py`）。
+- `scripts/collect.py` 的鎖檔機制 2026-09-16 前用 `fcntl.flock`——**Windows 完全沒有
+  這個模組**，import 那一行會讓整支程式在原生 Windows 上直接當掉。已經改成
+  `os.O_CREAT|O_EXCL` 的原子建檔鎖（POSIX／Windows 語意一致），但這只解決了
+  `collect.py` 這一層；`bootstrap.sh` 本身還是純 bash，原生 Windows 目前依然完全沒有
+  處理，這件事還沒有票追蹤
 - `seed/nineder-skill/` — 同步器的種子副本（`SKILL.md` ＋ `scripts/sync.sh`）。**刻意不放在
   `skills/` 底下**，這樣 plugin 機制不會把它當 skill 載入，成員機器上就只會有
   `~/.claude/skills/nineder-skill/` 一份。種子只在全新機器用得到，之後由 Redmine 附檔
@@ -139,7 +159,7 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
 | --- | --- |
 | 任何 skill 的內容 | 改 Redmine Skill 票的附檔＋推票頭「現行版本」。成員端下次開對話自動同步，**不必發 plugin、不必重啟** |
 | `collect.py` 的計算邏輯（採集器本體） | 走 GitLab `nineder/redmine/plugin/issue_provenance` 自己的部署流程；這裡的副本只在下次 plugin 發版時才會跟著更新，不必為了同步這一份而特地發版 |
-| `bootstrap.sh`、`issue_context.sh`、`ai_usage_inline.py`、`hooks.json`、`commands/setup.md`、`seed/` | 走本 repo 的發佈流程，成員要先更新再完整重啟 |
+| `bootstrap.sh`、`issue_context.sh`、`ai_usage_inline.py`、`daily_trigger.py`、`resolved_trigger.py`、`hooks.json`、`commands/setup.md`、`seed/` | 走本 repo 的發佈流程，成員要先更新再完整重啟 |
 
 ## 規格治理（單一事實來源）
 
