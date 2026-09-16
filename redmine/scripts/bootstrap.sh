@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# redmine plugin 4.0.7 —— SessionStart bootstrap（分發模型 v2）
+# redmine plugin 4.0.8 —— SessionStart bootstrap（分發模型 v2）
 # 規格正本：Redmine #26559（v3.3）；分發模型：#26309【分發模型 v2】；同步器：#26915；
-# 自動夾帳：#27113（#27090 的手動觸發 skill 衍生出來的裝機步驟）
+# 自動夾帳：#27113；用量排程（daily_trigger／resolved_trigger）：#27090
+#
+# 目前只在 macOS／Linux／WSL 上驗證過（照 #26559 既有支援範圍）。原生 Windows
+# 完全沒有處理——collect.py 已經在 2026-09-16 修掉 import fcntl 那個會讓它
+# 在原生 Windows 上直接當掉的問題，但這支 bootstrap.sh 本身是純 bash，
+# 原生 Windows 的 shell 執行不了；不要假設裝了這個 plugin 就代表 Windows
+# 機器上的排程也在跑，那件事還沒有人做。
 #
 # plugin 在 v2 之後只剩這一支入口，做五件事，順序固定：
-#   0. 把 hook 需要的四支腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
+#   0. 把 hook 需要的腳本複製到 ~/.claude/nineder/bin/（穩定位置）—— 理由見下方 STABLE_BIN
 #   1. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全不碰，
 #      之後由 Redmine 附檔自我升版——plugin 永遠不覆寫已安裝的版本）
 #   2. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit、SessionStart，
-#      以及 PreToolUse 的 create_issue／update_issue 兩條自動夾帳 hook
+#      PreToolUse 的 create_issue／update_issue 自動夾帳，以及 SessionStart 的每日
+#      用量排程、PostToolUse 的議題轉 Resolved 排程（4.0.8 新增，見 #27090）
 #      （承 #26559 v2.2 並於 v3.1 擴大：桌面版連 plugin 宣告的 hook 都不執行，
 #      2026-09-07 實測確認 —— 所以本腳本必須把「呼叫自己」的條目也寫進
 #      settings.json，否則 4.0.0 在純桌面版等於完全沒作用）
@@ -36,13 +43,14 @@ STABLE_BIN="${HOME}/.claude/nineder/bin"
 # 兩條 hook 於是都指向找不到的檔案（fail-open 不會報錯，但等於完全沒作用）。
 # 解法：把腳本複製到 ~/.claude/nineder/bin/，settings 條目一律指向這裡 ——
 # 兩種派發方式都成立，而且路徑穩定。內容有變才複製，重複執行不動 mtime。
-# ai_usage_inline.py／collect.py 兩支是 4.0.7 新增：前者是 PreToolUse hook 本體，
-# 後者是它會用 subprocess 呼叫的採集器，兩支必須一起在，缺一支 ai_usage_inline.py
-# 會 fail-open 直接放行原始寫入（見該檔 COLLECTOR 判斷）。
+# ai_usage_inline.py／collect.py 是 4.0.7 新增；daily_trigger.py／resolved_trigger.py
+# 是 4.0.8 新增。collect.py 是共用的採集器本體，其餘三支各自的 COLLECTOR 常數都抓
+# 同目錄下的 collect.py，不寫死任何人的開發路徑；缺 collect.py 三支都會 fail-open
+# 直接放行原始行為（各自檔案裡有各自的判斷）。
 copied=0
 if [ -f "${PLUGIN_ROOT}/scripts/bootstrap.sh" ] && [ -f "${PLUGIN_ROOT}/scripts/issue_context.sh" ]; then
   if mkdir -p "${STABLE_BIN}" 2>/dev/null; then
-    for f in bootstrap.sh issue_context.sh ai_usage_inline.py collect.py; do
+    for f in bootstrap.sh issue_context.sh ai_usage_inline.py collect.py daily_trigger.py resolved_trigger.py; do
       src="${PLUGIN_ROOT}/scripts/${f}"
       dst="${STABLE_BIN}/${f}"
       [ -f "${src}" ] || continue
@@ -68,8 +76,9 @@ if [ ! -e "${SELF_SKILL}" ]; then
   fi
 fi
 
-# ---- 2. settings.json 的 UserPromptSubmit／SessionStart／PreToolUse（承 #26559 v2.2 的
-#         install_settings_hook.sh，4.0.7 加入 PreToolUse 自動夾帳，見 #27113）----
+# ---- 2. settings.json 的 UserPromptSubmit／SessionStart／PreToolUse／PostToolUse
+#         （承 #26559 v2.2 的 install_settings_hook.sh；4.0.7 加入 PreToolUse 自動夾帳
+#         #27113；4.0.8 加入 SessionStart 每日排程與 PostToolUse 的 Resolved 排程 #27090）----
 if command -v python3 >/dev/null 2>&1; then
 python3 - <<'PY' 2>/dev/null || true
 import json, os, tempfile
@@ -78,21 +87,29 @@ home = os.path.expanduser("~")
 path = os.path.join(home, ".claude", "settings.json")
 BASE = "$HOME/.claude/nineder/bin/"
 
-# event -> 腳本檔名。都由 settings 層派送：桌面版不執行 plugin 宣告的任何 hook
-# （UserPromptSubmit 見 #26559 v2.2；SessionStart 於 2026-09-07 實測確認；PreToolUse
-# 同一個限制，2026-09-15 隨 #27113 一併確認），而 settings 層 CLI 與桌面版皆適用且有
-# file watcher。SessionStart 指向本腳本自己 —— 這是純桌面版機器唯一跑得到 bootstrap
-# 的路徑，所以第一次必須由人手動執行一次本腳本（見 README）。
+# (event, 腳本檔名) 的清單，*不是* dict——4.0.8 起 SessionStart 底下要放兩支腳本
+# （bootstrap.sh 自己、daily_trigger.py），dict 的 key 沒辦法重複。都由 settings 層
+# 派送：桌面版不執行 plugin 宣告的任何 hook（UserPromptSubmit 見 #26559 v2.2；
+# SessionStart 於 2026-09-07 實測確認；PreToolUse 同一個限制，2026-09-15 隨 #27113
+# 一併確認），而 settings 層 CLI 與桌面版皆適用且有 file watcher。SessionStart 的
+# bootstrap.sh 那一條指向本腳本自己 —— 這是純桌面版機器唯一跑得到 bootstrap 的路徑，
+# 所以第一次必須由人手動執行一次本腳本（見 README）。
 # 路徑指向 ~/.claude/nineder/bin/（第 0 步複製過去的副本）， *不是* plugin 目錄 ——
 # 組織派發的 plugin 路徑含 session id、每次都變，寫進 settings.json 下次就失效。
-WANT = {"UserPromptSubmit": "issue_context.sh", "SessionStart": "bootstrap.sh"}
+WANT = [
+    ("UserPromptSubmit", "issue_context.sh"),
+    ("SessionStart", "bootstrap.sh"),
+    ("SessionStart", "daily_trigger.py"),
+]
 
-# PreToolUse 跟上面不一樣：需要 matcher 指定攔哪個工具，一支腳本要掛在兩個 matcher
-# 上（create_issue 與 update_issue）。ai_usage_inline.py 本身找不到就 fail-open，
-# 不影響既有行為，所以晚一版才裝的人也不會被這一步卡住。
+# 需要 matcher 指定攔哪個工具的那些，跟上面分開處理。ai_usage_inline.py 一支腳本要
+# 掛在兩個 matcher 上（create_issue 與 update_issue）；resolved_trigger.py 是
+# 4.0.8 新增，只攔 update_issue（議題轉 Resolved 的訊號只會出現在這裡）。三支本身
+# 找不到就 fail-open，不影響既有行為，所以晚一版才裝的人也不會被這一步卡住。
 WANT_MATCHED = [
     ("PreToolUse", "mcp__nineder-redmine__create_issue", "ai_usage_inline.py"),
     ("PreToolUse", "mcp__nineder-redmine__update_issue", "ai_usage_inline.py"),
+    ("PostToolUse", "mcp__nineder-redmine__update_issue", "resolved_trigger.py"),
 ]
 
 try:
@@ -105,7 +122,7 @@ except Exception:
 
 hooks = data.setdefault("hooks", {})
 changed = False
-for event, script in WANT.items():
+for event, script in WANT:
     # 認得舊版寫進去的條目也要能清掉。4.0.3 以前指向 CLI marketplace 路徑，那條在組織派發
     # 的機器上永遠找不到檔案；只認新 marker 的話舊條目會留在原地變成重複條目（#26915
     # note-27）。所以兩種 marker 都算「我們的」，一律換成新的那一條。
@@ -114,6 +131,9 @@ for event, script in WANT.items():
     cmd = f'SCRIPT="{BASE}{script}"; [ -x "$SCRIPT" ] && exec "$SCRIPT"; exit 0'
     entries = hooks.get(event) or []
     ours = {"hooks": [{"type": "command", "command": cmd}]}
+    # 同一個 event 下可能已經有「別支腳本」的條目（例如 SessionStart 底下
+    # bootstrap.sh 跟 daily_trigger.py 並存）——比對 marker 時只清掉命中*這一支*
+    # 腳本 marker 的條目，其餘原封不動保留。
     kept = [e for e in entries
             if not any(m in json.dumps(e) for m in markers)]
     wanted = kept + [ours]
