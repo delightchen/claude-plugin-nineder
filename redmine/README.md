@@ -88,28 +88,34 @@ google plugin 已於本版整支廢除，其兩支 skill 改由 Skill 票
   UserPromptSubmit：桌面版不執行 plugin 宣告的該 event，而 CLI 會，兩邊都宣告會重複注入。
   （桌面版連 SessionStart 也不執行，所以這個宣告實際上只服務 CLI；桌面版靠 bootstrap 寫進
   settings.json 的那條）
-- `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做五件事。**目前只在
+- `scripts/bootstrap.sh` — SessionStart 唯一入口，依序做六件事。**目前只在
   macOS／Linux／WSL 上驗證過**（bash 腳本，原生 Windows 的殼層執行不了；即使能
   執行，`collect.py` 以外的部分也從沒在 Windows 上測過）：
-  0. 把自己、`issue_context.sh`、`ai_usage_inline.py`、`collect.py`、`daily_trigger.py`、
+  0. **版本自報**（4.0.9 新增）：印一行 `nineder-skill：目前 Redmine plugin 版本
+     vX.Y.Z（版號日期）`，讀 `.claude-plugin/plugin.json` 的 `version`／`versionDate`。
+     不管其餘步驟有沒有變動都印，因為它就是給人核對「這台機器是不是最新版」用的——
+     這件事在導入版本自報之前只能靠人工比對 `plugin.json` 內容或 commit hash，
+     在這之前的一次排查裡花了不少時間
+  1. 把自己、`issue_context.sh`、`ai_usage_inline.py`、`collect.py`、`daily_trigger.py`、
      `resolved_trigger.py` 複製到 `~/.claude/nineder/bin/`（內容有變才複製）——settings
      的 hook 一律指向這份副本，理由見「兩條派發來源」
-  1. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
+  2. `~/.claude/skills/nineder-skill/` **不存在**時從 `seed/` 種一份（存在就完全不碰 ——
      plugin 永遠不覆寫已安裝的版本，升版一律走 Redmine 附檔）。從穩定副本被呼叫時看不到
      `seed/`，此時印一行「請輸入 `/redmine:setup`」而不是靜默
-  2. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit、SessionStart（bootstrap.sh
+  3. 冪等維護 `~/.claude/settings.json` 的 **UserPromptSubmit、SessionStart（bootstrap.sh
      自己＋每日用量排程 daily_trigger.py）、PreToolUse 的 create_issue／update_issue 自動
      夾帳，以及 PostToolUse 的議題轉 Resolved 排程**（PreToolUse 見 v4.0.7、
      [#27113](https://redmine.nineder.com/issues/27113)；SessionStart 第二條與 PostToolUse 見 v4.0.8、
      [#27090](https://redmine.nineder.com/issues/27090)），全部指向 `~/.claude/nineder/bin/`。舊版寫進去的
      marketplace 路徑條目會一併換掉，不會變成重複條目；有 matcher 的條目連 matcher 一起
      比對，不會互相清掉。**已知殘留**：在 4.0.8 之前手動把 `daily_trigger.py`／
-     `resolved_trigger.py` 加進自己 `settings.json` 的機器（本文撰寫時只有維護者自己這台），
-     舊的手動條目不會被自動辨識、也不會被清掉，會跟新裝的穩定路徑版本並存，變成同一支腳本
-     被觸發兩次——不會出錯（`collect.py` 的鎖會擋下其中一次），但要手動清舊的那條才乾淨
-  3. 移除 v3.x 留下的 `~/.claude/commands/` 指標檔（redmine 四個＋google 兩個，只刪內容
+     `resolved_trigger.py` 加進自己 `settings.json` 的機器，舊的手動條目不會被自動辨識、
+     也不會被清掉，會跟新裝的穩定路徑版本並存，變成同一支腳本被觸發兩次——不會出錯
+     （`collect.py` 的鎖會擋下其中一次），但要手動清舊的那條才乾淨（維護者自己這台已於
+     2026-09-16 手動清過）
+  4. 移除 v3.x 留下的 `~/.claude/commands/` 指標檔（redmine 四個＋google 兩個，只刪內容
      確實是指標檔的）
-  4. 呼叫 `~/.claude/skills/nineder-skill/scripts/sync.sh --auto`
+  5. 呼叫 `~/.claude/skills/nineder-skill/scripts/sync.sh --auto`
 
   兩條界線：**不碰 `~/.claude.json`、不做 `claude mcp add`**（主設定檔併發寫有風險，且 hook
   環境未必找得到 `claude` 指令；MCP 註冊交給 `/nineder-skill` 在對話裡做）。任何錯誤都
