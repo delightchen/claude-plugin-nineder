@@ -16,6 +16,13 @@
 #   * 不砍：名稱不在 47 集合裡的目錄、plugin cache、目前 project 的 .claude/skills（同名影子只警告）
 #   * 下架：47 的票變成 Cancelled／Rejected → 搬到 ~/.claude/nineder/disabled/<名稱>.disabled-<日期>（不留在 skills/ 底下，
 #     因為留在那裡 Claude Code 會把它當成另一支 skill 載入）
+#   * 下架來源二（#27129）：額外讀取 GitLab repo nineder/claude/skills 根目錄的 deprecated-registry.json
+#     （由 #27128 的 plugin 在任一 Skill 票轉 Cancelled／Rejected 時維護），name 欄位比對本機
+#     ~/.claude/skills/*/ 資料夾名稱——涵蓋全部 8 個 Skill tracker 專案，不看安裝來源（47 自動裝／
+#     --install 票號／手動複製一視同仁）；沿用同一套下架與安全閥邏輯，不擴大自動安裝範圍。
+#     抓取失敗（網路不通、GitLab 401/404、格式不是合法 JSON）＝本次同步跳過下架偵測，不影響
+#     其他既有流程，比照缺鑰匙的 fail-open 處理。認證方式與快取策略待 #27128 完成、兩個開放問題
+#     定案後再調整——目前是先試不帶 token 的請求，失敗就整段跳過。
 #   * 審查中不下架（#26915 驗收 15）：票從 Resolved 退回 In Progress 等非終結狀態時，本機不裝、不更新、不下架，
 #     維持上一個 Resolved 版本並印一行提示 —— 升版送審期間全員不該失去這支 skill
 #   * 開發保護：目錄裡有 .nineder-dev 標記檔 → 本腳本完全不碰該目錄，只在報告標「開發中」
@@ -44,6 +51,14 @@ DISABLED = os.path.join(STATE, 'disabled')
 LOCK = os.path.join(STATE, '.sync.lock')
 WIKI = BASE + '/projects/47/wiki/Claude_Code_%E6%96%B0%E6%A9%9F%E5%99%A8%E5%AE%89%E8%A3%9D'
 SELF = 'nineder-skill'
+
+# ---- deprecated-registry.json（#27129）----
+GITLAB_BASE = 'https://gitlab.nineder.com'
+SKILLS_REPO = 'nineder/claude/skills'          # #27128 維護，格式由該票定案
+SKILLS_REPO_BRANCH = 'main'
+REGISTRY_FILE_PATH = 'deprecated-registry.json'
+GITLAB_TOKEN_FILE = os.path.join(STATE, 'gitlab_token')
+NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')     # 防禦：registry 的 name 若含路徑字元一律當成壞資料跳過
 
 args = sys.argv[1:]
 mode = next((a for a in args if a in ('--auto', '--sync', '--report', '--install')), '--auto')
@@ -83,6 +98,69 @@ def paged(path, key):
         if len(items) >= d.get('total_count', 0) or not d.get('issues'): break
         offset += 100
     return items
+
+# ---------- deprecated-registry.json（#27129）----------
+def load_gitlab_token():
+    t = os.environ.get('GITLAB_TOKEN', '').strip()
+    if t: return t
+    try:
+        t = open(GITLAB_TOKEN_FILE, encoding='utf-8').read().strip()
+        return t or None
+    except OSError:
+        return None
+
+def fetch_deprecated_registry():
+    """回 (entries, None) 或 (None, 失敗原因字串)；entries 是 list[dict]。
+    測試用逃生門：設定 NINEDER_SKILL_DEPRECATED_REGISTRY_FILE 指向本機檔案，改讀那份檔案而不打網路。
+    正式路徑打 GitLab Files API；認證與快取策略待 #27128 完成、兩個開放問題定案後再調整——
+    現在是先試不帶 token（有設定就帶），任何失敗（網路、401/403/404、内容不是合法 JSON array）
+    一律回傳失敗原因，呼叫端要整段跳過下架偵測，不可讓例外往外炸。"""
+    override = os.environ.get('NINEDER_SKILL_DEPRECATED_REGISTRY_FILE', '').strip()
+    try:
+        if override:
+            raw = open(override, encoding='utf-8').read()
+        else:
+            import urllib.parse
+            proj = urllib.parse.quote(SKILLS_REPO, safe='')
+            fp = urllib.parse.quote(REGISTRY_FILE_PATH, safe='')
+            url = f'{GITLAB_BASE}/api/v4/projects/{proj}/repository/files/{fp}/raw?ref={SKILLS_REPO_BRANCH}'
+            headers = {}
+            tok = load_gitlab_token()
+            if tok: headers['PRIVATE-TOKEN'] = tok
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as r:
+                raw = r.read().decode('utf-8', errors='replace')
+        entries = json.loads(raw)
+        if not isinstance(entries, list): raise ValueError('registry 內容不是 JSON array')
+        return entries, None
+    except Exception as e:
+        return None, f'{e.__class__.__name__}: {e}'
+
+def apply_registry_disable(entries, dry):
+    """套用 deprecated-registry.json 的下架邏輯；抽成獨立函式方便測試（#27129，見同目錄 test_registry_disable.py）。
+    回 (disabled, malformed, dev_skipped) 三個 list，呼叫端自行併回 result。
+    比對依 name 對本機資料夾名稱，不看安裝來源；已下架過的（資料夾已不在 SKILLS 底下）自然被
+    isdir 擋掉，不會重複動作；.nineder-dev 與自我保護兩個安全閥與 47 下架共用同一套語意。"""
+    disabled, malformed, dev_skipped = [], [], []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            malformed.append({'entry': entry, 'reason': '不是物件'}); continue
+        name = (entry.get('name') or '').strip()
+        if not name or not NAME_RE.match(name):
+            malformed.append({'entry': entry, 'reason': 'name 缺漏或含不安全字元'}); continue
+        if name == SELF:
+            continue                                        # 安全閥：同步器不自我下架
+        src = os.path.join(SKILLS, name)
+        if not os.path.isdir(src): continue                 # 本機沒裝，或先前已下架過（不重複動作）
+        if os.path.exists(os.path.join(src, '.nineder-dev')):
+            dev_skipped.append({'name': name, 'issue': entry.get('issue_id'), 'source': 'registry'}); continue
+        dst = os.path.join(DISABLED, f'{name}.disabled-{datetime.date.today():%Y%m%d}')
+        if not dry:
+            os.makedirs(DISABLED, exist_ok=True)
+            if os.path.exists(dst): dst += datetime.datetime.now().strftime('-%H%M%S')
+            shutil.move(src, dst)
+        disabled.append({'name': name, 'issue': entry.get('issue_id'), 'status': entry.get('status'),
+                          'deprecated_at': entry.get('deprecated_at'), 'moved_to': dst, 'dry_run': dry})
+    return disabled, malformed, dev_skipped
 
 # ---------- 版本 ----------
 VER_RE = re.compile(r'版本[：:]\s*v?(\d+(?:\.\d+)*)')
@@ -181,6 +259,7 @@ def main():
     result = {'mode': mode, 'dry_run': dry, 'key': {'source': ksrc, 'valid': None}, 'wiki': WIKI,
               'mcp': {}, 'auto_project_ids': sorted(AUTO_PROJECT_IDS), 'auto': [], 'installed': [], 'updated': [], 'disabled': [],
               'dev_skipped': [], 'ahead': [], 'failed': [], 'others': [], 'shadows': [], 'set47': [], 'local_other': [], 'reviewing': [],
+              'registry': {'ok': None, 'error': None, 'entries': 0}, 'registry_disabled': [], 'registry_malformed': [],
               'last_sync': None, 'error': None}
     # MCP 註冊狀態（只看檔案，不碰 MCP）
     try:
@@ -299,6 +378,16 @@ def main():
                 shutil.move(src, dst)
             result['disabled'].append({'issue': i['id'], 'name': n, 'status': i['status']['name'], 'moved_to': dst, 'dry_run': dry})
 
+        # ---- registry 下架：跨全部 8 個 Skill tracker 專案，不限 47，不看安裝來源（#27129）----
+        registry_entries, registry_err = fetch_deprecated_registry()
+        result['registry'] = {'ok': registry_err is None, 'error': registry_err,
+                               'entries': len(registry_entries) if registry_entries else 0}
+        if registry_entries is not None:
+            reg_disabled, reg_malformed, reg_dev_skipped = apply_registry_disable(registry_entries, dry)
+            result['registry_disabled'] = reg_disabled
+            result['registry_malformed'] = reg_malformed
+            result['dev_skipped'] += reg_dev_skipped
+
         # ---- 同名影子 ----
         installed_ver = {}
         try:
@@ -342,6 +431,8 @@ def main():
             say(f'nineder-skill：{x["name"]} 審查中（票 #{x["issue"]} 現為 {x["status"]}），本機維持 {x["local"]} 不動')
         for x in result['disabled']:
             say(f'nineder-skill：已停用 {x["name"]}（#{x["issue"]} 現為 {x["status"]}，已搬到 {x["moved_to"]}）')
+        for x in result['registry_disabled']:
+            say(f'nineder-skill：{x["name"]} 已停用（見 registry）')
         for x in result['failed']:
             n = x['name'] or '#' + str(x['issue'])
             if x.get('state') == 'self_not_resolved':
