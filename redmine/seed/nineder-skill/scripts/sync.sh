@@ -27,6 +27,10 @@
 #     跳過本次下架偵測。這把應是獨立的唯讀 Project Access Token（Reporter＋read_api），跟
 #     #27128 plugin 寫入用的那把（Maintainer＋api）分開，最小權限。
 #     快取：不做，每次同步都抓最新（#27128 那邊已確認：單一小檔案的一次 GET，成本可忽略）。
+#     名字重複使用防護：registry 裡的名字如果現在有任一張 Resolved 的 Skill 票在用（用既有的
+#     `resolved` 查詢結果比對，不多打網路），代表這個名字已經重新啟用，不下架，只記一筆
+#     conflict、印一行提示——是否清掉舊 registry 項目留給人工或 #27128 判斷，sync.sh 不自動決定
+#     （這個決策不該由每台機器各自認定，registry 是全公司共用的同一份資料）。
 #   * 審查中不下架（#26915 驗收 15）：票從 Resolved 退回 In Progress 等非終結狀態時，本機不裝、不更新、不下架，
 #     維持上一個 Resolved 版本並印一行提示 —— 升版送審期間全員不該失去這支 skill
 #   * 開發保護：目錄裡有 .nineder-dev 標記檔 → 本腳本完全不碰該目錄，只在報告標「開發中」
@@ -141,12 +145,17 @@ def fetch_deprecated_registry():
     except Exception as e:
         return None, f'{e.__class__.__name__}: {e}'
 
-def apply_registry_disable(entries, dry):
+def apply_registry_disable(entries, dry, resolved_names=frozenset()):
     """套用 deprecated-registry.json 的下架邏輯；抽成獨立函式方便測試（#27129，見同目錄 test_registry_disable.py）。
-    回 (disabled, malformed, dev_skipped) 三個 list，呼叫端自行併回 result。
+    回 (disabled, malformed, dev_skipped, conflict) 四個 list，呼叫端自行併回 result。
     比對依 name 對本機資料夾名稱，不看安裝來源；已下架過的（資料夾已不在 SKILLS 底下）自然被
-    isdir 擋掉，不會重複動作；.nineder-dev 與自我保護兩個安全閥與 47 下架共用同一套語意。"""
-    disabled, malformed, dev_skipped = [], [], []
+    isdir 擋掉，不會重複動作；.nineder-dev 與自我保護兩個安全閥與 47 下架共用同一套語意。
+
+    resolved_names：目前全公司任一個 Resolved 的 Skill 票用掉的名字集合（呼叫端從既有的
+    `resolved` 查詢結果算出，不必多打一次網路）。名字被重複使用時（舊票 Cancelled 留在
+    registry 裡、同名新票後來又 Resolved），這個名字現在有活的版本，不下架——只跳過並記進
+    conflict，是否清掉舊 registry 項目留給 #27128 那邊或人工判斷，不在這裡自動決定。"""
+    disabled, malformed, dev_skipped, conflict = [], [], [], []
     for entry in entries:
         if not isinstance(entry, dict):
             malformed.append({'entry': entry, 'reason': '不是物件'}); continue
@@ -159,6 +168,8 @@ def apply_registry_disable(entries, dry):
         if not os.path.isdir(src): continue                 # 本機沒裝，或先前已下架過（不重複動作）
         if os.path.exists(os.path.join(src, '.nineder-dev')):
             dev_skipped.append({'name': name, 'issue': entry.get('issue_id'), 'source': 'registry'}); continue
+        if name in resolved_names:
+            conflict.append({'name': name, 'issue': entry.get('issue_id'), 'status': entry.get('status')}); continue
         dst = os.path.join(DISABLED, f'{name}.disabled-{datetime.date.today():%Y%m%d}')
         if not dry:
             os.makedirs(DISABLED, exist_ok=True)
@@ -166,7 +177,7 @@ def apply_registry_disable(entries, dry):
             shutil.move(src, dst)
         disabled.append({'name': name, 'issue': entry.get('issue_id'), 'status': entry.get('status'),
                           'deprecated_at': entry.get('deprecated_at'), 'moved_to': dst, 'dry_run': dry})
-    return disabled, malformed, dev_skipped
+    return disabled, malformed, dev_skipped, conflict
 
 # ---------- 版本 ----------
 VER_RE = re.compile(r'版本[：:]\s*v?(\d+(?:\.\d+)*)')
@@ -266,7 +277,7 @@ def main():
               'mcp': {}, 'auto_project_ids': sorted(AUTO_PROJECT_IDS), 'auto': [], 'installed': [], 'updated': [], 'disabled': [],
               'dev_skipped': [], 'ahead': [], 'failed': [], 'others': [], 'shadows': [], 'set47': [], 'local_other': [], 'reviewing': [],
               'registry': {'ok': None, 'error': None, 'entries': 0}, 'registry_disabled': [], 'registry_malformed': [],
-              'last_sync': None, 'error': None}
+              'registry_conflict': [], 'last_sync': None, 'error': None}
     # MCP 註冊狀態（只看檔案，不碰 MCP）
     try:
         cj = json.load(open(os.path.join(HOME, '.claude.json')))
@@ -389,10 +400,13 @@ def main():
         result['registry'] = {'ok': registry_err is None, 'error': registry_err,
                                'entries': len(registry_entries) if registry_entries else 0}
         if registry_entries is not None:
-            reg_disabled, reg_malformed, reg_dev_skipped = apply_registry_disable(registry_entries, dry)
+            resolved_names = {n for n in (cf(i, 27) for i in resolved) if n}
+            reg_disabled, reg_malformed, reg_dev_skipped, reg_conflict = apply_registry_disable(
+                registry_entries, dry, resolved_names)
             result['registry_disabled'] = reg_disabled
             result['registry_malformed'] = reg_malformed
             result['dev_skipped'] += reg_dev_skipped
+            result['registry_conflict'] = reg_conflict
 
         # ---- 同名影子 ----
         installed_ver = {}
@@ -439,6 +453,8 @@ def main():
             say(f'nineder-skill：已停用 {x["name"]}（#{x["issue"]} 現為 {x["status"]}，已搬到 {x["moved_to"]}）')
         for x in result['registry_disabled']:
             say(f'nineder-skill：{x["name"]} 已停用（見 registry）')
+        for x in result['registry_conflict']:
+            say(f'nineder-skill：{x["name"]} 在 registry 標記停用（#{x["issue"]}），但目前有 Resolved 票在用同一個名字，本次不下架——可能需要清理舊的 registry 項目')
         for x in result['failed']:
             n = x['name'] or '#' + str(x['issue'])
             if x.get('state') == 'self_not_resolved':
