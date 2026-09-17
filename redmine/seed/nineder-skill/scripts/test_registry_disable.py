@@ -206,14 +206,41 @@ def scenario_fetch_registry():
         os.environ['NINEDER_SKILL_DEPRECATED_REGISTRY_FILE'] = os.path.join(home, 'does-not-exist.json')
         entries, err = fetch()
         check('When3/Then3: 檔案不存在（模擬網路不通／404）→ 回失敗不拋例外', entries is None and err, err)
+
+        os.environ.pop('NINEDER_SKILL_DEPRECATED_REGISTRY_FILE', None)
+        os.environ.pop('GITLAB_TOKEN', None)
+        entries, err = fetch()
+        check('缺 token: 直接回失敗、不嘗試匿名連線', entries is None and 'token' in err, err)
+        # 不測「有 token」這條路——那會真的打一次 gitlab.nineder.com，不做這種會打到真實外部服務的測試。
+        # 有 token 之後走的就是標準 urllib 呼叫，行為由 fetch_deprecated_registry 的例外處理統一接住。
     finally:
         os.environ.pop('NINEDER_SKILL_DEPRECATED_REGISTRY_FILE', None)
+        os.environ.pop('GITLAB_TOKEN', None)
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def scenario_real_format_fixture():
+    """實際上線的 deprecated-registry.json 除了 name/issue_id/status/deprecated_at 四欄，
+    #27128 那邊實際多帶了 version/reason 兩欄——確認多餘欄位不影響比對/下架邏輯。"""
+    home = tempfile.mkdtemp(prefix='nsr-test-')
+    try:
+        make_skill(home, 'redmine-git-parallel-build')
+        ns = load_module(home)
+        entries = [{
+            'name': 'redmine-git-parallel-build', 'issue_id': 26745, 'status': 'Cancelled',
+            'deprecated_at': '2026-09-16', 'version': 'v7.1', 'reason': '未附原因',
+        }]
+        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        check('多餘欄位不影響下架', len(disabled) == 1 and disabled[0]['name'] == 'redmine-git-parallel-build', disabled)
+        check('多餘欄位不會被誤判成壞資料', len(malformed) == 0, malformed)
+    finally:
         shutil.rmtree(home, ignore_errors=True)
 
 
 def main():
     for fn in [scenario_basic_disable, scenario_dev_marker, scenario_self_protection, scenario_not_installed,
-               scenario_malformed_entries, scenario_idempotent, scenario_dry_run, scenario_fetch_registry]:
+               scenario_malformed_entries, scenario_idempotent, scenario_dry_run, scenario_fetch_registry,
+               scenario_real_format_fixture]:
         fn()
 
     print(f'PASS {len(PASS)} / FAIL {len(FAIL)}')

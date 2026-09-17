@@ -20,9 +20,13 @@
 #     （由 #27128 的 plugin 在任一 Skill 票轉 Cancelled／Rejected 時維護），name 欄位比對本機
 #     ~/.claude/skills/*/ 資料夾名稱——涵蓋全部 8 個 Skill tracker 專案，不看安裝來源（47 自動裝／
 #     --install 票號／手動複製一視同仁）；沿用同一套下架與安全閥邏輯，不擴大自動安裝範圍。
-#     抓取失敗（網路不通、GitLab 401/404、格式不是合法 JSON）＝本次同步跳過下架偵測，不影響
-#     其他既有流程，比照缺鑰匙的 fail-open 處理。認證方式與快取策略待 #27128 完成、兩個開放問題
-#     定案後再調整——目前是先試不帶 token 的請求，失敗就整段跳過。
+#     抓取失敗（網路不通、GitLab 401/404、格式不是合法 JSON、缺 token）＝本次同步跳過下架偵測，
+#     不影響其他既有流程，比照缺鑰匙的 fail-open 處理。
+#     認證（#27128 已實測 nineder/claude/skills 是 private repo，匿名讀 404/302 導登入頁）：
+#     環境變數 GITLAB_TOKEN → 鑰匙檔 ~/.claude/nineder/gitlab_read_token → 都沒有＝缺 token，
+#     跳過本次下架偵測。這把應是獨立的唯讀 Project Access Token（Reporter＋read_api），跟
+#     #27128 plugin 寫入用的那把（Maintainer＋api）分開，最小權限。
+#     快取：不做，每次同步都抓最新（#27128 那邊已確認：單一小檔案的一次 GET，成本可忽略）。
 #   * 審查中不下架（#26915 驗收 15）：票從 Resolved 退回 In Progress 等非終結狀態時，本機不裝、不更新、不下架，
 #     維持上一個 Resolved 版本並印一行提示 —— 升版送審期間全員不該失去這支 skill
 #   * 開發保護：目錄裡有 .nineder-dev 標記檔 → 本腳本完全不碰該目錄，只在報告標「開發中」
@@ -57,7 +61,7 @@ GITLAB_BASE = 'https://gitlab.nineder.com'
 SKILLS_REPO = 'nineder/claude/skills'          # #27128 維護，格式由該票定案
 SKILLS_REPO_BRANCH = 'main'
 REGISTRY_FILE_PATH = 'deprecated-registry.json'
-GITLAB_TOKEN_FILE = os.path.join(STATE, 'gitlab_token')
+GITLAB_TOKEN_FILE = os.path.join(STATE, 'gitlab_read_token')   # 獨立唯讀 token，不是 #27128 plugin 寫入用那把
 NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')     # 防禦：registry 的 name 若含路徑字元一律當成壞資料跳過
 
 args = sys.argv[1:]
@@ -102,32 +106,34 @@ def paged(path, key):
 # ---------- deprecated-registry.json（#27129）----------
 def load_gitlab_token():
     t = os.environ.get('GITLAB_TOKEN', '').strip()
-    if t: return t
+    if t: return t, 'env'
     try:
         t = open(GITLAB_TOKEN_FILE, encoding='utf-8').read().strip()
-        return t or None
-    except OSError:
-        return None
+        if t: return t, 'file'
+    except OSError: pass
+    return None, None
 
 def fetch_deprecated_registry():
     """回 (entries, None) 或 (None, 失敗原因字串)；entries 是 list[dict]。
-    測試用逃生門：設定 NINEDER_SKILL_DEPRECATED_REGISTRY_FILE 指向本機檔案，改讀那份檔案而不打網路。
-    正式路徑打 GitLab Files API；認證與快取策略待 #27128 完成、兩個開放問題定案後再調整——
-    現在是先試不帶 token（有設定就帶），任何失敗（網路、401/403/404、内容不是合法 JSON array）
-    一律回傳失敗原因，呼叫端要整段跳過下架偵測，不可讓例外往外炸。"""
+    測試用逃生門：設定 NINEDER_SKILL_DEPRECATED_REGISTRY_FILE 指向本機檔案，改讀那份檔案而不打網路
+    （這條路徑不需要 token，優先於下面的正式路徑判斷）。
+    正式路徑打 GitLab Files API，一律要帶 token（#27128 已實測 nineder/claude/skills 是 private
+    repo）；沒有 token 直接回失敗，不嘗試匿名連線。不做快取，每次都抓最新（#27128 已確認這個
+    成本可忽略）。任何失敗（缺 token、網路不通、401/403/404、內容不是合法 JSON array）一律回傳
+    失敗原因，呼叫端整段跳過下架偵測，不可讓例外往外炸。"""
     override = os.environ.get('NINEDER_SKILL_DEPRECATED_REGISTRY_FILE', '').strip()
     try:
         if override:
             raw = open(override, encoding='utf-8').read()
         else:
+            tok, _ = load_gitlab_token()
+            if not tok:
+                return None, f'缺 GitLab 讀取 token（見 {GITLAB_TOKEN_FILE}）'
             import urllib.parse
             proj = urllib.parse.quote(SKILLS_REPO, safe='')
             fp = urllib.parse.quote(REGISTRY_FILE_PATH, safe='')
             url = f'{GITLAB_BASE}/api/v4/projects/{proj}/repository/files/{fp}/raw?ref={SKILLS_REPO_BRANCH}'
-            headers = {}
-            tok = load_gitlab_token()
-            if tok: headers['PRIVATE-TOKEN'] = tok
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as r:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={'PRIVATE-TOKEN': tok}), timeout=10) as r:
                 raw = r.read().decode('utf-8', errors='replace')
         entries = json.loads(raw)
         if not isinstance(entries, list): raise ValueError('registry 內容不是 JSON array')

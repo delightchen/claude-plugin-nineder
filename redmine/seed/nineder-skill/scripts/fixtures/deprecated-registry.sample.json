@@ -3,6 +3,8 @@
     "name": "redmine-git-parallel-build",
     "issue_id": 26745,
     "status": "Cancelled",
-    "deprecated_at": "2026-09-16"
+    "deprecated_at": "2026-09-16",
+    "version": "v7.1",
+    "reason": "未附原因"
   }
 ]
