@@ -70,7 +70,7 @@ def scenario_basic_disable():
         make_skill(home, 'redmine-git-parallel-build')
         ns = load_module(home)
         entries = json.load(open(os.path.join(HERE, 'fixtures', 'deprecated-registry.sample.json'), encoding='utf-8'))
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
         check('When1/Then1: 回報一筆下架', len(disabled) == 1, disabled)
         if disabled:
             check('When1/Then1: 下架對象是 redmine-git-parallel-build', disabled[0]['name'] == 'redmine-git-parallel-build')
@@ -91,7 +91,7 @@ def scenario_dev_marker():
         make_skill(home, 'some-dev-tool', dev=True)
         ns = load_module(home)
         entries = [{'name': 'some-dev-tool', 'issue_id': 99999, 'status': 'Cancelled', 'deprecated_at': '2026-09-16'}]
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
         check('When2/Then2: 不下架', len(disabled) == 0, disabled)
         check('When2/Then2: 列進 dev_skipped', len(dev_skipped) == 1 and dev_skipped[0]['name'] == 'some-dev-tool')
         check('When2/Then2: 資料夾維持原狀', os.path.isdir(os.path.join(home, '.claude', 'skills', 'some-dev-tool')))
@@ -106,7 +106,7 @@ def scenario_self_protection():
         make_skill(home, 'nineder-skill')
         ns = load_module(home)
         entries = [{'name': 'nineder-skill', 'issue_id': 1, 'status': 'Cancelled', 'deprecated_at': '2026-09-16'}]
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
         check('自我保護: 不下架自己', len(disabled) == 0, disabled)
         check('自我保護: 資料夾還在', os.path.isdir(os.path.join(home, '.claude', 'skills', 'nineder-skill')))
     finally:
@@ -119,7 +119,7 @@ def scenario_not_installed():
     try:
         ns = load_module(home)
         entries = [{'name': 'never-installed-skill', 'issue_id': 2, 'status': 'Rejected', 'deprecated_at': '2026-09-16'}]
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
         check('未安裝: 不報錯、不出現在任何清單', not disabled and not malformed and not dev_skipped)
     finally:
         shutil.rmtree(home, ignore_errors=True)
@@ -137,7 +137,7 @@ def scenario_malformed_entries():
             {'name': '../../etc', 'issue_id': 4, 'status': 'Cancelled'},   # 路徑穿越字元
             {'name': 'redmine-git-parallel-build', 'issue_id': 26745, 'status': 'Cancelled', 'deprecated_at': '2026-09-16'},
         ]
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
         check('壞資料: 三筆都被擋下', len(malformed) == 3, malformed)
         check('壞資料: 正常那筆仍正確下架', len(disabled) == 1 and disabled[0]['name'] == 'redmine-git-parallel-build')
         check('壞資料: /etc 沒有被動到', not os.path.isdir('/etc/.disabled') and os.path.isdir('/etc'))
@@ -152,9 +152,9 @@ def scenario_idempotent():
         make_skill(home, 'redmine-git-parallel-build')
         ns = load_module(home)
         entries = [{'name': 'redmine-git-parallel-build', 'issue_id': 26745, 'status': 'Cancelled', 'deprecated_at': '2026-09-16'}]
-        d1, m1, s1 = ns['apply_registry_disable'](entries, dry=False)
+        d1, m1, s1, c1 = ns['apply_registry_disable'](entries, dry=False)
         check('第一次: 下架一筆', len(d1) == 1)
-        d2, m2, s2 = ns['apply_registry_disable'](entries, dry=False)
+        d2, m2, s2, c2 = ns['apply_registry_disable'](entries, dry=False)
         check('When4/Then4: 第二次不重複下架', len(d2) == 0, d2)
         check('When4/Then4: 第二次不產生新的 disabled 目錄', len(d1) == 1)
         disabled_root = os.path.join(home, '.claude', 'nineder', 'disabled')
@@ -171,7 +171,7 @@ def scenario_dry_run():
         make_skill(home, 'redmine-git-parallel-build')
         ns = load_module(home)
         entries = [{'name': 'redmine-git-parallel-build', 'issue_id': 26745, 'status': 'Cancelled', 'deprecated_at': '2026-09-16'}]
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=True)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=True)
         check('dry-run: 回報會下架', len(disabled) == 1 and disabled[0]['dry_run'] is True)
         check('dry-run: 資料夾其實沒被搬走', os.path.isdir(os.path.join(home, '.claude', 'skills', 'redmine-git-parallel-build')))
     finally:
@@ -219,6 +219,32 @@ def scenario_fetch_registry():
         shutil.rmtree(home, ignore_errors=True)
 
 
+def scenario_name_reuse_conflict():
+    """名字重複使用防護：舊票 Cancelled 留在 registry 裡，但同名新票現在是 Resolved
+    （resolved_names 有這個名字）→ 不下架，記進 conflict，不當成安全閥（不進 dev_skipped）。"""
+    home = tempfile.mkdtemp(prefix='nsr-test-')
+    try:
+        make_skill(home, 'redmine-git-parallel-build')
+        ns = load_module(home)
+        entries = [{'name': 'redmine-git-parallel-build', 'issue_id': 26745, 'status': 'Cancelled',
+                    'deprecated_at': '2026-09-16'}]
+
+        # 沒有名字重複使用時（resolved_names 是空集合），行為跟之前一樣：正常下架
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
+        check('無衝突時: 正常下架', len(disabled) == 1 and len(conflict) == 0)
+
+        # 重裝一次，這次名字現在有一張 Resolved 票在用
+        make_skill(home, 'redmine-git-parallel-build')
+        disabled2, malformed2, dev_skipped2, conflict2 = ns['apply_registry_disable'](
+            entries, dry=False, resolved_names={'redmine-git-parallel-build'})
+        check('名字重複使用: 不下架', len(disabled2) == 0, disabled2)
+        check('名字重複使用: 記進 conflict', len(conflict2) == 1 and conflict2[0]['name'] == 'redmine-git-parallel-build', conflict2)
+        check('名字重複使用: 資料夾維持原狀', os.path.isdir(os.path.join(home, '.claude', 'skills', 'redmine-git-parallel-build')))
+        check('名字重複使用: 不算進 dev_skipped（那是給 .nineder-dev 用的）', len(dev_skipped2) == 0)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def scenario_real_format_fixture():
     """實際上線的 deprecated-registry.json 除了 name/issue_id/status/deprecated_at 四欄，
     #27128 那邊實際多帶了 version/reason 兩欄——確認多餘欄位不影響比對/下架邏輯。"""
@@ -230,7 +256,7 @@ def scenario_real_format_fixture():
             'name': 'redmine-git-parallel-build', 'issue_id': 26745, 'status': 'Cancelled',
             'deprecated_at': '2026-09-16', 'version': 'v7.1', 'reason': '未附原因',
         }]
-        disabled, malformed, dev_skipped = ns['apply_registry_disable'](entries, dry=False)
+        disabled, malformed, dev_skipped, conflict = ns['apply_registry_disable'](entries, dry=False)
         check('多餘欄位不影響下架', len(disabled) == 1 and disabled[0]['name'] == 'redmine-git-parallel-build', disabled)
         check('多餘欄位不會被誤判成壞資料', len(malformed) == 0, malformed)
     finally:
@@ -240,7 +266,7 @@ def scenario_real_format_fixture():
 def main():
     for fn in [scenario_basic_disable, scenario_dev_marker, scenario_self_protection, scenario_not_installed,
                scenario_malformed_entries, scenario_idempotent, scenario_dry_run, scenario_fetch_registry,
-               scenario_real_format_fixture]:
+               scenario_name_reuse_conflict, scenario_real_format_fixture]:
         fn()
 
     print(f'PASS {len(PASS)} / FAIL {len(FAIL)}')
