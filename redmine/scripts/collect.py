@@ -40,7 +40,6 @@ daily_trigger.py（每天第一個 session 啟動時）、resolved_trigger.py（
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -60,6 +59,7 @@ LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 MCP_PREFIX = "mcp__nineder-redmine__"
+CREATE_ISSUE_TOOL = MCP_PREFIX + "create_issue"
 
 # 哪些工具呼叫「讀過」或「寫過」一張議題，以及議題編號放在呼叫參數的哪個欄位。
 # 全部取自呼叫本身，不靠事後解析回應——呼叫當下就是事實，不必比對。
@@ -105,6 +105,10 @@ def load_state() -> dict:
     state.setdefault("pending", [])
     state.setdefault("daily_sent", {})
     state.setdefault("daily_pending", [])
+    # 批次校正（#27163）用自己的一份 fingerprint，跟 state["files"] 分開追蹤：
+    # 這支功能是後來加的，第一次跑的時候不能因為主掃描早就標記過某個檔案，
+    # 就永遠不去補做這個檔案的批次校正。
+    state.setdefault("correction_files", {})
     return state
 
 
@@ -115,8 +119,11 @@ def save_state(state: dict) -> None:
     tmp.replace(STATE_PATH)  # 換名是原子的：中途掛掉不會留下半個狀態檔
 
 
-def acquire_lock():
-    """搶一個檔案鎖，搶不到回傳 None。
+LOCK_STALE_SECONDS = 600  # 正常一次執行遠低於這個數字，超過就當作持有者已經不在了
+
+
+def acquire_lock() -> bool:
+    """搶一把鎖，搶不到回傳 False。
 
     三個排程觸發點（session 開始、議題轉 Resolved、手動執行）彼此互不
     知情，同時各跑一次是常態，不是例外——沒有這道鎖，兩邊會各自對同一批
@@ -124,24 +131,43 @@ def acquire_lock():
     較大總量蓋成較舊的較小值（#27090）。非阻塞：搶不到就立刻放棄，不排隊
     等待，因為下一次觸發本來就會補上這次沒做的事，排隊等待只是讓使用者
     多等一個用不到的行程。
+
+    用 O_CREAT|O_EXCL 的原子建檔當鎖，不用 fcntl.flock——後者是 Windows
+    完全沒有的模組（2026-09-16 發現：本檔一直隱性排除了 Windows，import
+    fcntl 那一行會讓整支程式在還沒解析參數之前就先當掉）。O_EXCL 在
+    POSIX 與 Windows 上語意一致，跨平台不必分兩套邏輯。
+
+    代價：flock 隨行程結束自動釋放，這個做法不會——行程被強制中斷
+    （SIGKILL、斷電）會留下鎖檔案。用檔案的 mtime 判斷是否棄置：正常一次
+    執行是幾秒到幾十秒，超過 LOCK_STALE_SECONDS 還沒被清掉，就當作上一個
+    持有者已經死亡，接手並重試一次；這個門檻夠寬，不會誤判正在跑的行程。
     """
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK_PATH, "w")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return None
-    return fh
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            age = time.time() - LOCK_PATH.stat().st_mtime
+        except OSError:
+            return False
+        if age <= LOCK_STALE_SECONDS:
+            return False
+        try:
+            LOCK_PATH.unlink()
+        except OSError:
+            return False
+        return acquire_lock()  # 清掉棄置鎖後重試一次，理論上這次一定搶得到
 
 
-def release_lock(fh) -> None:
-    if fh is None:
+def release_lock(held: bool) -> None:
+    if not held:
         return
     try:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-    finally:
-        fh.close()
+        LOCK_PATH.unlink()
+    except OSError:
+        pass
 
 
 def api_key() -> str:
@@ -444,6 +470,279 @@ def journal_id_of(block: dict, pending_tool: dict) -> int | None:
 
 
 # ----------------------------------------------------------------------
+# 批次建立子票的回溯校正（#27163）
+#
+# 只在這裡結算：即時 hook（ai_usage_inline.py）與上面 parse_transcript 的
+# day_chunks，一遇到讀寫其他議題就切一段——那是給「單張議題」的即時歸因用
+# 的，套在「一次連續建立好幾張子票」上會把中途讀参照票的量另外記走一份，
+# 跟每日台帳的 read 歸因重複計費。這裡的规則不同（2026-09-17 定案）：
+# 中途讀寫的任何議題，token 一律留在累積池裡，只在遇到下一次 create_issue
+# 時才結算一段——這才是「這批子票花了多少」該有的量。
+# ----------------------------------------------------------------------
+
+def parse_creation_events(path: Path) -> tuple[list[dict], str | None]:
+    """單一 session 內，依序取出每一次 create_issue 呼叫的累積用量與 parent_id。
+
+    parent_id 取自呼叫當下的參數（不是事後補的 relates）——建立子票時，
+    母票多半已經在同一批裡建好，parent_id 當下就填得出來，不必等事後補
+    關聯才能判斷樹狀關係。回傳的每一筆事件都帶著「上一次 create_issue（或
+    session 開頭）到這一次之間」累積的全部用量，不管中途穿插了什麼。
+    """
+    events: list[dict] = []
+    pending_tool: dict[str, str] = {}
+    pending_input: dict[str, dict] = {}
+    seen_requests: set[str] = set()
+    bucket = new_bucket()
+    session_id: str | None = None
+
+    with path.open(errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            session_id = rec.get("sessionId") or session_id
+
+            d = date_of(rec.get("timestamp"))
+            if d is not None and bucket["date"] is None:
+                bucket["date"] = d
+
+            kind = rec.get("type")
+            msg = rec.get("message") or {}
+
+            if kind == "assistant":
+                for blk in msg.get("content") or []:
+                    if not (isinstance(blk, dict) and blk.get("type") == "tool_use"):
+                        continue
+                    name = str(blk.get("name", ""))
+                    pending_tool[blk["id"]] = name
+                    if name == CREATE_ISSUE_TOOL:
+                        pending_input[blk["id"]] = blk.get("input") or {}
+
+                rid = rec.get("requestId")
+                usage = msg.get("usage") or {}
+                if rid and usage and rid not in seen_requests:
+                    seen_requests.add(rid)
+                    add_usage(bucket, usage, msg.get("model"), rec.get("effort"))
+
+            elif kind == "user":
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for blk in content:
+                    if not isinstance(blk, dict) or blk.get("type") != "tool_result":
+                        continue
+                    tool_use_id = blk.get("tool_use_id")
+                    if pending_tool.get(tool_use_id) != CREATE_ISSUE_TOOL:
+                        continue
+                    for entry in write_ledger_entries(blk, pending_tool):
+                        if entry["journal_id"] is not None:
+                            continue  # 不是这支函式管的形狀（create_issue 一律沒有 journal）
+                        events.append({
+                            "issue_id": entry["issue_id"],
+                            # MCP 工具參數叫 parent_issue_id，不是 parent_id
+                            # （create_issue schema：parent_issue_id 建子票）。
+                            "parent_id": coerce_issue_id(
+                                (pending_input.get(tool_use_id) or {}).get("parent_issue_id")),
+                            **usage_fields(bucket),
+                        })
+                        carried_date = bucket["date"]
+                        bucket = new_bucket()
+                        bucket["date"] = carried_date
+
+    return events, session_id
+
+
+def build_creation_tree(events: list[dict]) -> dict[int, dict]:
+    """依 events 的 parent_id 建父子關係，只認同一批裡的邊。
+
+    parent_id 指到批次外的議題（母票是早就存在的舊票，不是這次連著建的）
+    視同這個節點在這批次裡沒有母票——它在這批次裡自己就是一個根，不是孤兒，
+    也不會因為找不到母票而被排除在校正範圍外。
+    """
+    by_id = {e["issue_id"]: dict(e, children=[]) for e in events}
+    for e in events:
+        pid = e["parent_id"]
+        if pid is not None and pid in by_id and pid != e["issue_id"]:
+            by_id[pid]["children"].append(e["issue_id"])
+    return by_id
+
+
+def _height(issue_id: int, by_id: dict, cache: dict[int, int]) -> int:
+    if issue_id in cache:
+        return cache[issue_id]
+    children = by_id[issue_id]["children"]
+    h = 0 if not children else 1 + max(_height(c, by_id, cache) for c in children)
+    cache[issue_id] = h
+    return h
+
+
+def split_evenly(members: list[dict], count: int) -> list[dict]:
+    """把 members 的用量加總，均分成 count 份，整數不留餘數。
+
+    除不盡時前面幾份多拿 1（哪一份拿到不重要——反正這一層本來就是均分，
+    不嘗試分出每一張的精確份額），確保加總起來剛好等於總量，不會因為
+    整數除法讓校正後的總量比校正前少一點。
+    """
+    total_tokens = {k: sum(m["tokens"][k] for m in members) for k in TOKEN_KEYS}
+    totals = {
+        "requests": sum(m["requests"] for m in members),
+        "prompts": sum(m["prompts"] for m in members),
+        "errors": sum(m["errors"] for m in members),
+    }
+    model = next((m["model"] for m in reversed(members) if m.get("model")), None)
+    effort = next((m["effort"] for m in reversed(members) if m.get("effort")), None)
+
+    def distribute(total: int) -> list[int]:
+        base, rem = divmod(total, count)
+        return [base + (1 if i < rem else 0) for i in range(count)]
+
+    token_shares = {k: distribute(v) for k, v in total_tokens.items()}
+    other_shares = {k: distribute(v) for k, v in totals.items()}
+
+    return [
+        {"tokens": {k: token_shares[k][i] for k in TOKEN_KEYS},
+         **{k: other_shares[k][i] for k in other_shares},
+         "model": model, "effort": effort}
+        for i in range(count)
+    ]
+
+
+def compute_batch_correction(events: list[dict]) -> dict[int, dict]:
+    """#27163 定案演算法：葉節點用序列差值，往上每一層均分剩下的池子。
+
+    葉節點（這批裡自己沒有子票的）直接拿它自己那段序列差值——events 裡
+    每一筆本來就是「上一次 create_issue 到這一次」的原始累積量。再往上每
+    一層，不嘗試切出每一張母票各自精確的視窗（建立順序可能交錯，切不出
+    乾淨的邊界）：同一層的所有票，不論屬於哪一棵子樹，直接把「這些票自己
+    那段原始序列差值」（by_id[iid] 裡還沒被下面層級動過的原始值）合併、
+    均分。之所以不必再另外減去底下各層的加總——描述裡「這一層的累積減去
+    底下所有層級」——是因為底下各層的份額，本來就是從它們自己那段原始序列
+    差值切出來的，從沒進過這一層節點自己的原始序列差值裡；兩邊本來就沒有
+    重疊，不需要真的做一次減法。
+    """
+    by_id = build_creation_tree(events)
+    height_cache: dict[int, int] = {}
+    heights = {iid: _height(iid, by_id, height_cache) for iid in by_id}
+    max_h = max(heights.values(), default=-1)
+
+    final: dict[int, dict] = {}
+    for h in range(max_h + 1):
+        ids = [iid for iid in by_id if heights[iid] == h]
+        if not ids:
+            continue
+        if h == 0:
+            for iid in ids:
+                e = by_id[iid]
+                final[iid] = {"tokens": dict(e["tokens"]), "requests": e["requests"],
+                               "prompts": e["prompts"], "errors": e["errors"],
+                               "model": e["model"], "effort": e["effort"]}
+        else:
+            shares = split_evenly([by_id[iid] for iid in ids], len(ids))
+            for iid, share in zip(ids, shares):
+                final[iid] = share
+    return final
+
+
+def delete_issue_usage(base: str, key: str, issue_id: int, timeout: float = 15.0) -> dict:
+    """清空這張議題「自己的」用量，校正前的第一步（見 DELETE /issue_provenance/issues/:id）。"""
+    req = urllib.request.Request(
+        f"{base}/issue_provenance/issues/{issue_id}.json",
+        headers={"X-Redmine-API-Key": key}, method="DELETE",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def post_issue_usage(base: str, key: str, issue_id: int, body: dict, timeout: float = 15.0) -> str:
+    """回傳 'ok'、'exists'，或拋出例外——跟 post() 對 journal 的那支同一套慣例。"""
+    req = urllib.request.Request(
+        f"{base}/issue_provenance/issues/{issue_id}.json",
+        data=json.dumps(body).encode(),
+        headers={"X-Redmine-API-Key": key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return "ok"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            return "exists"
+        raise
+
+
+def apply_batch_corrections(final: dict[int, dict], session_id: str, base: str, key: str,
+                             dry_run: bool, verbose: bool) -> dict:
+    """對 compute_batch_correction 算出來的每一張議題做 DELETE＋POST，回傳計數。
+
+    手動的 --correct-batch 與排程流程的自動批次校正共用這一支——兩邊唯一的
+    差別是「怎麼取得 events」，送出的邏輯不重複寫兩份。
+    """
+    corrected = skipped = failed = 0
+    for issue_id, usage in final.items():
+        total = sum(usage["tokens"].values())
+        if dry_run or verbose:
+            suffix = "（dry-run，未送出）" if dry_run else ""
+            print(f"  議題 #{issue_id}：{total:,} token{suffix}")
+        if dry_run:
+            continue
+        try:
+            delete_issue_usage(base, key, issue_id)
+            result = post_issue_usage(base, key, issue_id, payload_for(usage, session_id))
+            if result == "exists":
+                skipped += 1
+            else:
+                corrected += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            if verbose:
+                print(f"  議題 #{issue_id}：失敗 {exc}")
+    return {"corrected": corrected, "skipped": skipped, "failed": failed}
+
+
+def run_batch_correction(args) -> dict:
+    """--correct-batch 的主流程：手動、立即校正指定的一個 session。
+
+    範圍只到「自己剛剛建立的那批」（#27163 拍板）：讀取哪個 session 的取法
+    跟 --pending 一致，不做跨人歷史回填，所以不需要 clear_ai_usage 或 admin。
+    跟排程流程（_scan_and_send）不一樣的地方：這裡是使用者明確要求「現在就
+    校正這個」，所以不管 state["correction_files"] 裡的 fingerprint 有沒有
+    對上，一律重算重送；送完才回頭補上 fingerprint，讓下一次排程掃描不會
+    為了同一批內容再白做一次 DELETE＋POST。
+    """
+    if args.session:
+        candidates = list(PROJECTS_DIR.glob(f"*/{args.session}.jsonl"))
+        if not candidates:
+            print(json.dumps({"error": f"找不到工作階段 {args.session}"}, ensure_ascii=False))
+            return {"exit_code": 1}
+        path = candidates[0]
+    else:
+        files = sorted(PROJECTS_DIR.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime)
+        if not files:
+            print(json.dumps({"error": "找不到任何對話紀錄"}, ensure_ascii=False))
+            return {"exit_code": 1}
+        path = files[-1]
+
+    events, session_id = parse_creation_events(path)
+    if not events or session_id is None:
+        print("這個工作階段沒有找到任何 create_issue 事件，無需校正")
+        return {"exit_code": 0, "issues": 0}
+
+    final = compute_batch_correction(events)
+    key = "" if args.dry_run else api_key()
+    result = apply_batch_corrections(final, session_id, args.base, key, args.dry_run, args.verbose)
+
+    print(f"session {session_id}：{len(events)} 個建立事件，{len(final)} 張議題")
+    if not args.dry_run:
+        print(f"已校正 {result['corrected']}，已存在略過 {result['skipped']}，失敗 {result['failed']}")
+        state = load_state()
+        stat = path.stat()
+        state["correction_files"][str(path)] = f"{stat.st_mtime_ns}:{stat.st_size}"
+        save_state(state)
+    return {"exit_code": 1 if result["failed"] else 0, "issues": len(final), **result}
+
+
+# ----------------------------------------------------------------------
 # 送出
 # ----------------------------------------------------------------------
 
@@ -682,6 +981,8 @@ def main() -> int:
     ap.add_argument("--pending", action="store_true",
                     help="輸出當前工作階段「上次歸帳到現在」的用量（JSON），供寫 note 時一併帶上")
     ap.add_argument("--session", help="指定工作階段；省略時取最近異動的那一個")
+    ap.add_argument("--correct-batch", action="store_true",
+                    help="回溯校正指定 session 裡連續建立的那一批子票的用量分攤（#27163）")
     ap.add_argument("--baseline", action="store_true",
                     help="把目前所有可歸屬的區間標記為已處理但不送出，作為「從此刻開始」的起點")
     ap.add_argument("--trigger", default="manual",
@@ -692,9 +993,14 @@ def main() -> int:
     if args.pending:
         return emit_pending(args.session)
 
+    if args.correct_batch:
+        # 手動、一次性的動作，不是排程掃描——不搶鎖也不寫執行紀錄，跟
+        # --pending 一樣的道理：它不碰 STATE_PATH，跟自動掃描不會互相踩到。
+        return run_batch_correction(args)["exit_code"]
+
     started = time.time()
     lock = acquire_lock()
-    if lock is None:
+    if not lock:
         # 三個觸發點（session 開始、議題轉 Resolved、手動執行）彼此不知道
         # 對方存不存在，同時各跑一次是常態而不是例外。兩邊都對著同一批
         # 對話紀錄重算，算出來的值理論上一樣，蓋掉彼此不會錯；但落地順序
@@ -739,6 +1045,7 @@ def _scan_and_send(args) -> dict:
     state = load_state()
     posted = set(state.get("posted", []))
     daily_sent: dict[str, str] = state.get("daily_sent", {})
+    correction_tracked: dict[str, str] = state["correction_files"]
     key = "" if args.dry_run else api_key()
 
     files = sorted(PROJECTS_DIR.glob("*/*.jsonl"))
@@ -747,35 +1054,49 @@ def _scan_and_send(args) -> dict:
     # 每一筆：{"key":, "fingerprint":, "payload":}。key 以檔案路徑＋日期／歸屬／
     # 議題組成，用來判斷這筆資料自上次送出後有沒有變過，不必每次都重送。
     daily_items: list[dict] = []
+    # 每一筆：(session_id, compute_batch_correction 算出來的 {issue_id: usage} 字典)。
+    batch_todo: list[tuple[str, dict[int, dict]]] = []
 
     for path in files:
         stat = path.stat()
         fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}"
-        # 檔案沒動過就整個跳過。動過的整份重掃，而不是從上次的位移接續:
-        # 累積差要從區間開頭算起，從中途接手會把一段拆成兩半各記一次。
-        # 重複解析的成本遠小於算錯的代價，而且 posted／daily_sent 會擋下重送。
-        if state["files"].get(str(path)) == fingerprint:
+        main_stale = state["files"].get(str(path)) != fingerprint
+        # 批次校正（#27163）用自己的一份 fingerprint：這支功能是後來才加的，
+        # 不能因為主掃描早就標記過某個檔案沒動過，就永遠不去補做這個檔案的
+        # 批次校正——兩者獨立判斷，各自決定要不要重新處理這個檔案。
+        correction_stale = correction_tracked.get(str(path)) != fingerprint
+        if not main_stale and not correction_stale:
             skipped += 1
             continue
 
-        segments, _leftover, session_id, day_chunks = parse_transcript(path)
-        scanned += 1
-        if session_id is None:
-            continue
-        for seg in segments:
-            if seg["journal_id"] in posted:
-                continue
-            to_send.append((seg["journal_id"], payload_for(seg, session_id)))
+        # 檔案沒動過就整個跳過，動過的整份重掃，而不是從上次的位移接續:
+        # 累積差要從區間開頭算起，從中途接手會把一段拆成兩半各記一次。
+        # 重複解析的成本遠小於算錯的代價，而且 posted／daily_sent 會擋下重送。
+        if main_stale:
+            segments, _leftover, session_id, day_chunks = parse_transcript(path)
+            scanned += 1
+            if session_id is not None:
+                for seg in segments:
+                    if seg["journal_id"] in posted:
+                        continue
+                    to_send.append((seg["journal_id"], payload_for(seg, session_id)))
 
-        for chunk in merge_daily_chunks(day_chunks):
-            row_key = f"{path}::{chunk['date']}::{chunk['attribution']}::{chunk['issue_id']}"
-            row_fp = json.dumps([chunk["tokens"], chunk["requests"], chunk["prompts"], chunk["errors"]],
-                                 sort_keys=True)
-            if daily_sent.get(row_key) == row_fp:
-                continue  # 自上次成功送出後沒有變化，不必重送
-            daily_items.append({"key": row_key, "fingerprint": row_fp,
-                                 "payload": payload_for_daily(chunk, session_id)})
-        state["files"][str(path)] = fingerprint
+                for chunk in merge_daily_chunks(day_chunks):
+                    row_key = f"{path}::{chunk['date']}::{chunk['attribution']}::{chunk['issue_id']}"
+                    row_fp = json.dumps(
+                        [chunk["tokens"], chunk["requests"], chunk["prompts"], chunk["errors"]],
+                        sort_keys=True)
+                    if daily_sent.get(row_key) == row_fp:
+                        continue  # 自上次成功送出後沒有變化，不必重送
+                    daily_items.append({"key": row_key, "fingerprint": row_fp,
+                                         "payload": payload_for_daily(chunk, session_id)})
+                state["files"][str(path)] = fingerprint
+
+        if correction_stale:
+            events, csession_id = parse_creation_events(path)
+            correction_tracked[str(path)] = fingerprint
+            if events and csession_id:
+                batch_todo.append((csession_id, compute_batch_correction(events)))
 
     # 上次沒送成功的先試，失敗的原因通常是暫時的
     retry = state.get("pending", [])
@@ -853,6 +1174,18 @@ def _scan_and_send(args) -> dict:
                 state["daily_pending"] = []
                 daily_report = f"新增 {result.get('inserted', 0)}，更新 {result.get('updated', 0)}"
 
+    # 批次校正（#27163）：跟寫入紀錄表／每日台帳不同軌——DELETE＋POST 本身
+    # 就是覆蓋式的，沒有「已存在就跳過」的必要，也沒有 pending 重試佇列；
+    # 單筆失敗只影響那一張議題，不影響同一批裡的其他張。
+    batch_correction = {"sessions": 0, "corrected": 0, "skipped": 0, "failed": 0}
+    for csession_id, final in batch_todo:
+        if not final:
+            continue
+        batch_correction["sessions"] += 1
+        r = apply_batch_corrections(final, csession_id, args.base, key, args.dry_run, args.verbose)
+        for k in ("corrected", "skipped", "failed"):
+            batch_correction[k] += r[k]
+
     state["posted"] = sorted(posted)
     state["pending"] = still_pending
     if not args.dry_run:
@@ -872,11 +1205,17 @@ def _scan_and_send(args) -> dict:
         print(f"寫入紀錄表：送出 {sent}，已存在 {exists}，失敗待重試 {failed}")
         if daily_report:
             print(f"每日台帳：{daily_report}")
+    if batch_correction["sessions"]:
+        print(f"批次校正：{batch_correction['sessions']} 個 session，"
+              f"校正 {batch_correction['corrected']}，已存在 {batch_correction['skipped']}，"
+              f"失敗 {batch_correction['failed']}"
+              + ("（dry-run，未送出）" if args.dry_run else ""))
     return {
-        "exit_code": 1 if failed else 0,
+        "exit_code": 1 if (failed or batch_correction["failed"]) else 0,
         "scanned": scanned, "skipped": skipped,
         "write_ledger": {"sent": sent, "exists": exists, "failed": failed, "tokens": attributed},
         "daily_ledger": {"rows": len(daily_items), "tokens": daily_total, "result": daily_report},
+        "batch_correction": batch_correction,
     }
 
 
