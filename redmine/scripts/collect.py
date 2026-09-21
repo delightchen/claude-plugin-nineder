@@ -1216,6 +1216,7 @@ def _scan_and_send(args) -> dict:
                 "journal_baselined": len(marked), "daily_baselined": len(daily_items)}
 
     sent = exists = failed = 0
+    write_delivered_tokens = 0  # 驗收第八組：報表要能對得上帳，只算真的送達的
     still_pending: list[dict] = []
     for journal_id, body in queue:
         if args.dry_run:
@@ -1226,6 +1227,9 @@ def _scan_and_send(args) -> dict:
         try:
             result = post(args.base, key, journal_id, body)
             posted.add(journal_id)
+            # exists（409）代表這筆用量本來就已經在伺服器上，不是這次沒送到——
+            # 一樣算「送達」，不是「無法處理」。
+            write_delivered_tokens += sum(body["tokens"].values())
             if result == "exists":
                 exists += 1
             else:
@@ -1239,6 +1243,7 @@ def _scan_and_send(args) -> dict:
                 print(f"  journal {journal_id}: 失敗 {exc}")
 
     daily_report = None
+    daily_delivered_tokens = 0  # 驗收第八組：只算真的送達的，隔離／待重試的不算
     if args.dry_run:
         if args.verbose:
             for item in daily_items:
@@ -1271,6 +1276,8 @@ def _scan_and_send(args) -> dict:
                 for item in sent_items:
                     for k in item.get("merged_keys", [item["key"]]):
                         daily_sent[k] = item["fingerprint"]
+                daily_delivered_tokens = sum(
+                    sum(it["payload"]["tokens"].values()) for it in sent_items)
                 state["daily_sent"] = daily_sent
                 state["daily_pending"] = []
                 inserted = result.get("inserted", 0) if result else 0
@@ -1303,6 +1310,8 @@ def _scan_and_send(args) -> dict:
     if total:
         print(f"用量：寫入紀錄表 {attributed:,} token（{100 * attributed / total:.1f}%），"
               f"每日台帳 {daily_total:,}（{100 * daily_total / total:.1f}%）")
+    delivered = write_delivered_tokens + daily_delivered_tokens
+    unprocessable = total - delivered
     if args.dry_run:
         print(f"待送出：寫入紀錄表 {len(queue)} 筆、每日台帳 {len(daily_items)} 筆"
               "（dry-run，未送出也未寫入狀態）")
@@ -1310,6 +1319,12 @@ def _scan_and_send(args) -> dict:
         print(f"寫入紀錄表：送出 {sent}，已存在 {exists}，失敗待重試 {failed}")
         if daily_report:
             print(f"每日台帳：{daily_report}")
+        # 驗收第八組：四個數字要能對得上帳——送達的兩邊相加，加上仍然無法
+        # 處理的（失敗待重試、已隔離、或整批留待下次），要等於這次處理的總量。
+        # 「無法處理」是這次執行結束當下的狀態，不是「永遠救不回來」：待重試
+        # 的下次還會再試，只有已隔離的才是真的救不回來（見 daily_usage_rejected.jsonl）。
+        print(f"對帳：總量 {total:,}（寫入紀錄表 {write_delivered_tokens:,} ＋ "
+              f"每日台帳 {daily_delivered_tokens:,} ＋ 仍無法處理 {unprocessable:,}）")
     if batch_correction["sessions"]:
         print(f"批次校正：{batch_correction['sessions']} 個 session，"
               f"校正 {batch_correction['corrected']}，已存在 {batch_correction['skipped']}，"
@@ -1318,9 +1333,12 @@ def _scan_and_send(args) -> dict:
     return {
         "exit_code": 1 if (failed or batch_correction["failed"]) else 0,
         "scanned": scanned, "skipped": skipped,
-        "write_ledger": {"sent": sent, "exists": exists, "failed": failed, "tokens": attributed},
-        "daily_ledger": {"rows": len(daily_items), "tokens": daily_total, "result": daily_report},
+        "write_ledger": {"sent": sent, "exists": exists, "failed": failed, "tokens": attributed,
+                          "delivered_tokens": write_delivered_tokens},
+        "daily_ledger": {"rows": len(daily_items), "tokens": daily_total, "result": daily_report,
+                          "delivered_tokens": daily_delivered_tokens},
         "batch_correction": batch_correction,
+        "reconcile": {"total": total, "delivered": delivered, "unprocessable": unprocessable},
     }
 
 
