@@ -55,6 +55,7 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 STATE_PATH = Path.home() / ".claude" / "nineder" / "ai_usage_state.json"
 KEY_PATH = Path.home() / ".claude" / "nineder" / "redmine_api_key"
 RUN_LOG_PATH = Path.home() / ".claude" / "nineder" / "collector_runs.jsonl"
+DAILY_REJECTED_LOG_PATH = Path.home() / ".claude" / "nineder" / "daily_usage_rejected.jsonl"
 LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
@@ -915,6 +916,98 @@ def post_daily(base: str, key: str, rows: list[dict], timeout: float = 20.0) -> 
         raise
 
 
+ROW_ERROR_RE = re.compile(r"^row (\d+):")
+
+
+class DailyPostError(Exception):
+    """post_daily_resilient 送出時遇到網路／伺服器暫時性錯誤（非 422）往外拋。
+
+    附帶 remaining（還沒送出、該留到下次重試）與 rejected（已經在這次重試
+    迴圈裡確定是哪一列資料本身有問題、記錄下原因、不會再回到 pending 裡）—
+    呼叫端需要兩者才能正確更新狀態，不能只知道「失敗了」。
+    """
+
+    def __init__(self, remaining: list[dict], rejected: list[tuple[dict, str]], message: str) -> None:
+        super().__init__(message)
+        self.remaining = remaining
+        self.rejected = rejected
+
+
+def post_daily_resilient(
+    base: str, key: str, items: list[dict], timeout: float = 20.0
+) -> tuple[list[dict], list[tuple[dict, str]], dict | None, str | None]:
+    """送每日台帳整批，一列一列地把「資料本身不合法」的列隔離掉。
+
+    伺服器整批一個交易，任何一列不合法就整批 422——這是伺服器該有的行為
+    （半套資料比沒有資料更難查）。但呼叫端如果因此把整批當成失敗丟掉，
+    後果是同一批裡其他合法的用量也跟著消失：來源檔案在送出結果出爐前
+    就已經被標成「已掃描」（見 _scan_and_send），這些列不會再被重新產生，
+    一去不回（#27090 驗收第十組實測踩到：2026-09-19 當天 6 次批次因為單一
+    列指向不存在的議題而整批遺失）。
+
+    422 的錯誤訊息固定是「row N: 原因」（N 是這次送出的陣列位置，見
+    DailyUsage.prepare／guard_against_duplicates!），這個位置在整批裡是
+    確定的、不是猜的，所以可以把第 N 列單獨挑出來隔離，其餘的重新送一次。
+    隔離不等於補救——議題真的不存在就是救不回來，但至少被記下來、
+    不是悄悄消失，而且不會拖累同一批裡其他本來合法的列。
+
+    如果錯誤訊息認不出格式（例如「rows is empty」這種整批性、不是針對
+    某一列的錯誤），沒辦法只挑一列隔離而不誤殺其他列，此時整批原樣
+    回傳給呼叫端當結構性錯誤處理，不在這裡瞎猜。
+
+    回傳 (sent_items, rejected, result, structural_error)：
+    - sent_items：最後一次成功送出的那些 item（呼叫端拿去標記 daily_sent）。
+    - rejected：[(item, 原因), ...]，被隔離掉、不會再重試的列。
+    - result：成功時是伺服器回應的 {"inserted":, "updated":}；全部被隔離掉
+      而完全沒有東西可送時是 None。
+    - structural_error：認不出是哪一列時的錯誤訊息；其餘情況為 None。
+    """
+    remaining = list(items)
+    rejected: list[tuple[dict, str]] = []
+    while remaining:
+        try:
+            result = post_daily(base, key, [it["payload"] for it in remaining], timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — 網路/5xx，留給呼叫端決定要不要重試
+            raise DailyPostError(remaining, rejected, str(exc)) from exc
+
+        if result.get("ok") is not False:
+            return remaining, rejected, result, None
+
+        match = ROW_ERROR_RE.match(str(result.get("error", "")))
+        idx = int(match.group(1)) if match else -1
+        if match is None or not 0 <= idx < len(remaining):
+            return [], rejected, None, result.get("error")
+
+        rejected.append((remaining.pop(idx), result["error"]))
+
+    return [], rejected, None, None
+
+
+def record_rejected_daily_rows(rejected: list[tuple[dict, str]]) -> None:
+    """把被隔離的每日台帳列連同原因寫進一份獨立的紀錄檔。
+
+    排程觸發時沒有人盯著終端機，只印在標準輸出的東西會隨下次執行的
+    輸出被沖掉。這份檔案讓「哪一列被隔離、為什麼」在事後還查得到——
+    不遺失指的是「不悄悄消失」，不是「一定要送得進去」（議題真的不存在
+    就是送不進去）。寫入失敗（例如磁碟滿了）不應該讓採集器本身也跟著
+    報錯，所以吞掉例外，跟 log_run 的做法一致。
+    """
+    if not rejected:
+        return
+    try:
+        DAILY_REJECTED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with DAILY_REJECTED_LOG_PATH.open("a") as fh:
+            for item, reason in rejected:
+                fh.write(json.dumps({
+                    "rejected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "key": item.get("key"),
+                    "reason": reason,
+                    "payload": item.get("payload"),
+                }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def log_run(record: dict) -> None:
     """每次執行都留一行紀錄，不管是誰觸發、成功還是失敗。
 
@@ -1154,25 +1247,37 @@ def _scan_and_send(args) -> dict:
                       f"歸屬 {item['payload']['attribution']}，議題 {item['payload']['issue_id']}")
     elif daily_items:
         try:
-            result = post_daily(args.base, key, [item["payload"] for item in daily_items])
-        except Exception as exc:  # noqa: BLE001
-            # 網路或伺服器暫時的問題：整批留到下次重試，不標記任何一筆為已送出。
-            state["daily_pending"] = daily_items
+            sent_items, rejected, result, structural_error = post_daily_resilient(
+                args.base, key, daily_items)
+        except DailyPostError as exc:
+            # 網路或伺服器暫時的問題：還沒送出的（exc.remaining）留到下次重試；
+            # 這次迴圈裡已經確定是哪一列資料本身有問題的（exc.rejected）已經
+            # 各自記下原因，不放回 pending，否則下次又會把它跟好資料湊成同一批。
+            state["daily_pending"] = exc.remaining
+            record_rejected_daily_rows(exc.rejected)
             daily_report = f"送出失敗，將於下次執行重試：{exc}"
+            if exc.rejected:
+                daily_report += f"；另有 {len(exc.rejected)} 筆資料本身不合法已隔離，見 {DAILY_REJECTED_LOG_PATH}"
         else:
-            if result.get("ok") is False:
-                # 伺服器判定資料本身不合法（例如議題已不存在）。重送不會變好，
-                # 不放進 daily_pending 無限重試——失敗要看得見，但不是看不見
-                # 的死迴圈。來源資料改變時（檔案內容變了）下次會重新產生並再試。
+            record_rejected_daily_rows(rejected)
+            if structural_error is not None:
+                # 錯誤訊息認不出是哪一列（整批性的結構錯誤），沒辦法只挑一列
+                # 隔離而不誤殺其他列。重送不會變好，不放進 daily_pending 無限
+                # 重試——失敗要看得見，但不是看不見的死迴圈。來源資料改變時
+                # （檔案內容變了）下次會重新產生並再試。
                 state["daily_pending"] = []
-                daily_report = f"送出失敗，不會自動重試同一批：{result['error']}"
+                daily_report = f"送出失敗，不會自動重試同一批：{structural_error}"
             else:
-                for item in daily_items:
+                for item in sent_items:
                     for k in item.get("merged_keys", [item["key"]]):
                         daily_sent[k] = item["fingerprint"]
                 state["daily_sent"] = daily_sent
                 state["daily_pending"] = []
-                daily_report = f"新增 {result.get('inserted', 0)}，更新 {result.get('updated', 0)}"
+                inserted = result.get("inserted", 0) if result else 0
+                updated = result.get("updated", 0) if result else 0
+                daily_report = f"新增 {inserted}，更新 {updated}"
+            if rejected:
+                daily_report += f"；隔離 {len(rejected)} 筆資料本身不合法（見 {DAILY_REJECTED_LOG_PATH}）"
 
     # 批次校正（#27163）：跟寫入紀錄表／每日台帳不同軌——DELETE＋POST 本身
     # 就是覆蓋式的，沒有「已存在就跳過」的必要，也沒有 pending 重試佇列；
