@@ -646,9 +646,19 @@ def compute_batch_correction(events: list[dict]) -> dict[int, dict]:
 
 
 def delete_issue_usage(base: str, key: str, issue_id: int, timeout: float = 15.0) -> dict:
-    """清空這張議題「自己的」用量，校正前的第一步（見 DELETE /issue_provenance/issues/:id）。"""
+    """清空這張議題「自己的」用量，校正前的第一步（見 DELETE /issue_provenance/issues/:id）。
+
+    ``only=creation`` 是 Redmine #27236 的修正：不加這個參數時，伺服器端的
+    destroy 連這張議題底下所有 journal 掛的用量列也一併清空——這支函式的目的
+    從來就只是清掉「建立事件」那一列（journal_id 為 NULL），卻誤把同一張議題
+    當時剛被 origin 寫入用量的 journal 列也一起清成 NULL。#27236 追出來的
+    現場：三次批次校正對 #27228 送出的 DELETE，每次都在某個 journal 剛被即時
+    記到用量之後幾秒內發生，清掉的兩列一列是建立事件、另一列正是那個不相干
+    的 journal——之後再也沒有人補寫回去，資料庫看起來就像「查得到 409、卻是
+    NULL」。加了這個參數，伺服器只動建立事件那一列，不再牽連任何 journal。
+    """
     req = urllib.request.Request(
-        f"{base}/issue_provenance/issues/{issue_id}.json",
+        f"{base}/issue_provenance/issues/{issue_id}.json?only=creation",
         headers={"X-Redmine-API-Key": key}, method="DELETE",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
