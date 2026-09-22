@@ -24,6 +24,11 @@ ai_usage」，而那句「記得」就是它失效的地方——正式站 1,287
 本檔跟 collect.py 一起由 bootstrap.sh 複製到 ~/.claude/nineder/bin/（穩定位置，
 理由與 bootstrap.sh／issue_context.sh 相同：組織派發的 plugin 路徑含 session id、
 每次開對話都會變）。COLLECTOR 因此用同目錄下的 collect.py，不寫死路徑。
+
+4.1.6：#27248 查出這支腳本原本九條放棄路徑全部靜默、不留任何痕跡——事後完全
+分不清是「暫時沒有新用量」這種正常情況，還是採集器本身壞掉。這版在每一條放棄
+路徑前補一行 SKIP_LOG，只記「為什麼放棄」，不影響前面三條規則：一樣不擋寫入、
+一樣不補零、寫 log 本身失敗也一樣吞掉不影響原本行為。
 """
 
 import json
@@ -36,11 +41,27 @@ from pathlib import Path
 COLLECTOR = str(Path(__file__).resolve().parent / "collect.py")
 # 上一次帶出去的是哪一段。用來擋同一輪內的重複帶（見 already_carried）。
 STATE = os.path.expanduser("~/.claude/nineder/ai_usage_inline_state.json")
+# 每一次放棄夾帶的原因，一行一則 JSON。純診斷用途，不是用量資料的一部分。
+SKIP_LOG = os.path.expanduser("~/.claude/nineder/ai_usage_inline_skip.log")
 TIMEOUT = 25
 
 
-def nothing():
-    """什麼都不改，讓這次呼叫照原樣送出去。"""
+def log_skip(reason, **extra):
+    """記一行「這次為什麼沒有夾帶用量」。盡力而為，失敗就算了，不能影響 nothing() 的行為。"""
+    try:
+        os.makedirs(os.path.dirname(SKIP_LOG), exist_ok=True)
+        entry = {"at": time.time(), "reason": reason}
+        entry.update(extra)
+        with open(SKIP_LOG, "a") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def nothing(reason=None, **extra):
+    """什麼都不改，讓這次呼叫照原樣送出去；順便留一行為什麼放棄的診斷紀錄。"""
+    if reason:
+        log_skip(reason, **extra)
     sys.exit(0)
 
 
@@ -82,45 +103,53 @@ def already_carried(payload):
 def main():
     try:
         event = json.load(sys.stdin)
-    except Exception:
-        nothing()
+    except Exception as e:
+        nothing("stdin_parse_error", error=str(e))
 
     tool_input = event.get("tool_input") or {}
 
     # 已經自己帶了就不要蓋掉。手動帶的那一份也是採集器輸出，而且呼叫端比這裡
     # 更清楚它要記的是哪一段。
     if tool_input.get("ai_usage"):
-        nothing()
+        nothing("already_has_ai_usage")
 
     # update_issue 不帶 notes 時多半只是改欄位，Redmine 仍然會產生 journal，
     # 用量掛上去是對的，所以不在這裡篩。真正該篩掉的是讀取類工具，那個由
     # settings.json 的 matcher 負責。
 
     if not os.path.exists(COLLECTOR):
-        nothing()
+        nothing("collector_missing", collector=COLLECTOR)
 
     try:
         out = subprocess.run(
             [sys.executable, COLLECTOR, "--pending"],
             capture_output=True, text=True, timeout=TIMEOUT,
         )
-    except Exception:
-        nothing()
+    except Exception as e:
+        nothing("collector_subprocess_error", error=str(e))
 
     if out.returncode != 0:
-        nothing()
+        nothing(
+            "collector_nonzero_exit",
+            returncode=out.returncode,
+            stderr=(out.stderr or "")[-500:],
+        )
 
     try:
         payload = json.loads(out.stdout.strip().splitlines()[-1])
-    except Exception:
-        nothing()
+    except Exception as e:
+        nothing(
+            "collector_output_unparseable",
+            error=str(e),
+            stdout_tail=out.stdout[-500:],
+        )
 
     if not payload.get("pending"):
         # 上次歸帳之後沒有新的用量。這是正常狀態，不是錯誤。
-        nothing()
+        nothing("no_pending_usage")
 
     if already_carried(payload):
-        nothing()
+        nothing("duplicate_fingerprint", session=payload.get("session"))
 
     # 逐字送出採集器算出來的那一份，只去掉 pending 這個旗標——它是給這支腳本
     # 判斷用的，不是用量的一部分。
@@ -138,6 +167,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as e:
         # 這支腳本的任何失敗都不該讓使用者的寫入失敗。
-        nothing()
+        nothing("unhandled_exception", error=str(e))
