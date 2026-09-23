@@ -58,6 +58,18 @@ RUN_LOG_PATH = Path.home() / ".claude" / "nineder" / "collector_runs.jsonl"
 DAILY_REJECTED_LOG_PATH = Path.home() / ".claude" / "nineder" / "daily_usage_rejected.jsonl"
 LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 
+# parse_transcript／note_issue 的歸屬演算法版本（#27248）。只在演算法本身
+# 改了、可能讓「已經掃過、標記為不動」的舊逐字稿重算出不同結果時才調高——
+# 不是每次改 collect.py 都要動。調高後，下一次任何非 --pending／--correct-batch
+# 的執行（daily_trigger／resolved_trigger／手動跑／/redmine-ai-usage）都會自動
+# 觸發一次全量重新掃描（等同 --rescan-all），一次性把新演算法在舊資料上抓得
+# 到、以前抓不到的部分自然補上；state["posted"]／state["daily_sent"] 的既有
+# 防重送機制保證這一次重掃不會動到任何已經正確送達的東西，純粹是撿漏＋修正
+# 錯誤歸屬，不是砍掉重練。
+#   1：#27090 之前的原始版本
+#   2：修 note_issue 換題判定偷走同一回合自己用量的 bug（#27248）
+ALGO_VERSION = 2
+
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 MCP_PREFIX = "mcp__nineder-redmine__"
 CREATE_ISSUE_TOOL = MCP_PREFIX + "create_issue"
@@ -110,6 +122,9 @@ def load_state() -> dict:
     # 這支功能是後來加的，第一次跑的時候不能因為主掃描早就標記過某個檔案，
     # 就永遠不去補做這個檔案的批次校正。
     state.setdefault("correction_files", {})
+    # 上一次做「全量重新掃描」時，parse_transcript 的演算法是第幾版
+    # （見 ALGO_VERSION，#27248）。0 代表從來沒做過。
+    state.setdefault("rescanned_at_algo_version", 0)
     return state
 
 
@@ -1119,6 +1134,11 @@ def main() -> int:
                     help="回溯校正指定 session 裡連續建立的那一批子票的用量分攤（#27163）")
     ap.add_argument("--baseline", action="store_true",
                     help="把目前所有可歸屬的區間標記為已處理但不送出，作為「從此刻開始」的起點")
+    ap.add_argument("--rescan-all", action="store_true",
+                    help="忽略「檔案沒變就跳過」的快取，強制對全部本機逐字稿重新解析一次"
+                         "（撿漏＋修正舊演算法算錯的部分；posted／daily_sent 的防重送機制"
+                         "照舊生效，不影響任何已經正確送達的紀錄）。ALGO_VERSION 提升時，"
+                         "任何一次正常執行都會自動觸發一次，不必手動加這個旗標，見 #27248")
     ap.add_argument("--trigger", default="manual",
                     help="這次執行是誰觸發的（manual／session_start／issue_resolved／…），"
                          "只用來寫進執行紀錄，不影響行為")
@@ -1182,6 +1202,14 @@ def _scan_and_send(args) -> dict:
     correction_tracked: dict[str, str] = state["correction_files"]
     key = "" if args.dry_run else api_key()
 
+    # 演算法版本升級時，自動視同這次帶了 --rescan-all（#27248）：不用等
+    # 有人手動記得跑，下一次任何正常排程或手動執行就會自己補上一次全量重掃。
+    auto_rescan = state.get("rescanned_at_algo_version") != ALGO_VERSION
+    force_rescan = args.rescan_all or auto_rescan
+    if auto_rescan and not args.dry_run:
+        print(f"演算法版本升級到 {ALGO_VERSION}（上次全量重掃是 "
+              f"{state.get('rescanned_at_algo_version')}），本次自動做一次全量重新掃描")
+
     files = sorted(PROJECTS_DIR.glob("*/*.jsonl"))
     scanned = skipped = 0
     to_send: list[tuple[int, dict]] = []
@@ -1194,10 +1222,12 @@ def _scan_and_send(args) -> dict:
     for path in files:
         stat = path.stat()
         fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}"
-        main_stale = state["files"].get(str(path)) != fingerprint
+        main_stale = force_rescan or state["files"].get(str(path)) != fingerprint
         # 批次校正（#27163）用自己的一份 fingerprint：這支功能是後來才加的，
         # 不能因為主掃描早就標記過某個檔案沒動過，就永遠不去補做這個檔案的
-        # 批次校正——兩者獨立判斷，各自決定要不要重新處理這個檔案。
+        # 批次校正——兩者獨立判斷，各自決定要不要重新處理這個檔案。演算法升級
+        # 只影響 parse_transcript（主掃描），跟批次校正是不相干的另一套邏輯，
+        # 不強制重跑後者。
         correction_stale = correction_tracked.get(str(path)) != fingerprint
         if not main_stale and not correction_stale:
             skipped += 1
@@ -1342,6 +1372,10 @@ def _scan_and_send(args) -> dict:
     state["posted"] = sorted(posted)
     state["pending"] = still_pending
     if not args.dry_run:
+        # 這次是完整跑過一輪（不是 dry-run），且沒有中途拋例外才會走到這裡，
+        # 代表目前這個演算法版本已經對全部本機檔案生效過一次——往後除非又
+        # 升版，不用再自動重掃。
+        state["rescanned_at_algo_version"] = ALGO_VERSION
         save_state(state)
 
     attributed = sum(sum(b["tokens"].values()) for _, b in queue)
@@ -1380,6 +1414,7 @@ def _scan_and_send(args) -> dict:
                           "delivered_tokens": daily_delivered_tokens},
         "batch_correction": batch_correction,
         "reconcile": {"total": total, "delivered": delivered, "unprocessable": unprocessable},
+        "rescan_all": force_rescan, "auto_rescan": auto_rescan, "algo_version": ALGO_VERSION,
     }
 
 
