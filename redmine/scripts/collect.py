@@ -315,13 +315,37 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
     leftover 維持舊有形狀（供 --pending 一次性帶出目前開著的那一段），
     day_chunks 是新增的，包含檔案掃描到最後那一段還沒結算的內容——
     每日台帳本來就是 upsert，把還在累積中的當日總量也送出去是對的。
+
+    4.1.7（#27248）：一則訊息含多個 content block 時會拆成多行寫入，每行
+    都帶完整的 usage——舊版在「看到 usage 就立刻加進 bucket」，但同一回合
+    (同一個 requestId) 的 tool_use 有時出現在比 usage 更晚的那一行。這樣一
+    來，「這一則自己的 usage 先加進 bucket，這一則的 tool_use 才觸發換題」
+    的順序就反過來了：換題判定看到的 bucket 裡，已經混進了這一回合自己的
+    用量，於是這筆用量被换题邏輯回頭算給「換題之前」的那張議題，不是這次
+    真正要寫入的這張——查 "#27236":https://redmine.nineder.com/issues/27236
+    journal 179691 等多筆「origin=mcp 卻查無任何嘗試」的案例，實測到的正是
+    這個機制，不是 hook 沒觸發（見 "#27248":https://redmine.nineder.com/issues/27248）。
+    改法：usage 先記在 pending_usage，不立刻加進 bucket；等確定這一整個
+    requestId 的 tool_use（連帶它們觸發的換題判定）都套用完了——也就是遇到
+    下一個不同的 requestId、或不是 assistant 的紀錄——才真的落地。同一回合
+    內連續多個 tool_use 各自换题（例如 create_issue_relation 一次碰兩張
+    議題）的既有行為不受影響，因為用量本來就是等换题判定全部跑完才加總，
+    落在「這回合最後換到的那張」議題上，跟舊版對多議題單回合的處理一致。
     """
-    seen_requests: set[str] = set()
     pending_tool: dict[str, str] = {}   # tool_use_id -> 工具名
     segments: list[dict] = []
     day_chunks: list[dict] = []
     bucket = new_bucket()
     session_id: str | None = None
+    pending_usage: dict | None = None   # 還沒落地的這一回合 usage（見上）
+    pending_rid: str | None = None
+
+    def flush_usage() -> None:
+        nonlocal bucket, pending_usage, pending_rid
+        if pending_usage is not None:
+            add_usage(bucket, pending_usage["usage"], pending_usage["model"], pending_usage["effort"])
+        pending_usage = None
+        pending_rid = None
 
     with path.open(errors="replace") as fh:
         for line in fh:
@@ -330,6 +354,14 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
             except ValueError:
                 continue
             session_id = rec.get("sessionId") or session_id
+
+            kind = rec.get("type")
+            rid = rec.get("requestId")
+            if kind != "assistant" or rid != pending_rid:
+                # 換了一個新回合（requestId 不同），或不是 assistant 紀錄：
+                # 上一回合不會再有更晚的 tool_use 回頭改變它該歸屬哪張議題，
+                # 這裡才是真正安全可以落地的時機。
+                flush_usage()
 
             d = date_of(rec.get("timestamp"))
             if d is not None:
@@ -342,13 +374,14 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                     bucket = new_bucket()
                     bucket["date"] = d
 
-            kind = rec.get("type")
             msg = rec.get("message") or {}
 
             if kind == "assistant":
-                # 這一則的工具呼叫先記，這則自己的 usage 後加：換題要切的是
-                # 「換題之前」累積的量，不能連這一則自己的用量都算進舊的
-                # 那張議題——不然新議題的第一則請求，用量會被記到舊議題上。
+                # 這一則的工具呼叫先記：換題要切的是「換題之前」累積的量，
+                # 不能連這一回合自己的用量都算進舊的那張議題——不然新議題的
+                # 第一則請求，用量會被記到舊議題上（這一則自己的 usage 要等
+                # 上面 flush_usage 判定「這回合結束」才真的加，見本函式開頭
+                # 4.1.7 的說明）。
                 for blk in msg.get("content") or []:
                     if not (isinstance(blk, dict) and blk.get("type") == "tool_use"):
                         continue
@@ -368,13 +401,10 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                             if iid is not None:
                                 bucket = note_issue(bucket, iid, "write", day_chunks)
 
-                rid = rec.get("requestId")
                 usage = msg.get("usage") or {}
-                # 一則訊息含多個 content block 時會拆成多行寫入，每行都帶
-                # 完整的 usage。實測重複率 54%：不去重，帳目虛增一倍。
-                if rid and usage and rid not in seen_requests:
-                    seen_requests.add(rid)
-                    add_usage(bucket, usage, msg.get("model"), rec.get("effort"))
+                if rid and usage:
+                    pending_usage = {"usage": usage, "model": msg.get("model"), "effort": rec.get("effort")}
+                    pending_rid = rid
 
             elif kind == "user":
                 content = msg.get("content")
@@ -408,6 +438,7 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                             bucket = new_bucket()
                             bucket["date"] = carried_date
 
+    flush_usage()  # 檔案掃到底，最後一回合的 usage 也要落地，不能留在 pending 裡消失。
     leftover = None if is_empty(bucket) else usage_fields(bucket)
     tail_chunk = finalize_chunk(bucket)
     if tail_chunk is not None:
