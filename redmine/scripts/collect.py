@@ -40,12 +40,14 @@ daily_trigger.py（每天第一個 session 啟動時）、resolved_trigger.py（
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -125,6 +127,10 @@ def load_state() -> dict:
     # 上一次做「全量重新掃描」時，parse_transcript 的演算法是第幾版
     # （見 ALGO_VERSION，#27248）。0 代表從來沒做過。
     state.setdefault("rescanned_at_algo_version", 0)
+    # 上一次查詢 Server 端 Reset（Redmine #27260）查到哪裡，ISO 8601 字串。
+    # None 代表從來沒查過——這台機器第一次執行，會拿到全部歷史 Reset，但
+    # 那時 posted／daily_sent 也還是空的，沒有東西可以「重送」，等於無操作。
+    state.setdefault("last_reset_check", None)
     return state
 
 
@@ -346,8 +352,21 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
     內連續多個 tool_use 各自换题（例如 create_issue_relation 一次碰兩張
     議題）的既有行為不受影響，因為用量本來就是等换题判定全部跑完才加總，
     落在「這回合最後換到的那張」議題上，跟舊版對多議題單回合的處理一致。
+
+    4.1.9（#27248 上線後在真實資料上實測抓到的回歸）：上面「遇到不是
+    assistant 的紀錄就落地」這條規則，遇到「一回合連續發出兩次工具呼叫、
+    第一次的 tool_result 先回來、隔了一則使用者紀錄後同一個 requestId 才
+    出現第二次」這種形狀時會出包——第一次落地把這回合的 usage 加進 bucket
+    是對的（不這樣做就會重蹈 4.1.7 要修的那個覆轍），但同一個 requestId
+    稍後再出現時，舊寫法沒有任何記憶說「這段已經落地過」，於是又把同一份
+    usage 當成新回合再排一次、重複計算——實測在一份真實逐字稿上抓到整整
+    多算一次的請求。改法：帶回舊版原本就有的 seen_requests 全域集合，只
+    決定「這個 requestId 可不可以被排進 pending_usage」，跟「什麼時候把
+    pending_usage 落地」完全分開——落地的時機仍然是上面 4.1.7 那套規則，
+    但同一個 requestId 一旦排過一次，之後不管再出現幾次都不會重新排。
     """
     pending_tool: dict[str, str] = {}   # tool_use_id -> 工具名
+    seen_requests: set[str] = set()     # 哪些 requestId 已經排進過 pending_usage，防止重複計算
     segments: list[dict] = []
     day_chunks: list[dict] = []
     bucket = new_bucket()
@@ -417,7 +436,10 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                                 bucket = note_issue(bucket, iid, "write", day_chunks)
 
                 usage = msg.get("usage") or {}
-                if rid and usage:
+                if rid and usage and (rid == pending_rid or rid not in seen_requests):
+                    # 同一回合還沒落地（rid == pending_rid）就繼續覆蓋，理論上是同一份
+                    # 數字；已經落地過的 requestId（見上面 4.1.9 的說明）不重新排。
+                    seen_requests.add(rid)
                     pending_usage = {"usage": usage, "model": msg.get("model"), "effort": rec.get("effort")}
                     pending_rid = rid
 
@@ -438,7 +460,12 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                         jid = entry["journal_id"]
                         if jid is not None:
                             if not is_empty(bucket):
-                                segments.append({"journal_id": jid, **usage_fields(bucket)})
+                                # date 不是伺服器需要的欄位（payload_for 不會
+                                # 送出它），只給呼叫端自己用——Redmine #27260
+                                # 的 Reset 機制要知道「這則 journal 對應哪一天」
+                                # 才能判斷這個範圍要不要忽略本地既有的去重紀錄。
+                                segments.append({"journal_id": jid, "date": bucket["date"],
+                                                  **usage_fields(bucket)})
                             carried_date = bucket["date"]
                             bucket = new_bucket()
                             bucket["date"] = carried_date
@@ -689,6 +716,48 @@ def compute_batch_correction(events: list[dict]) -> dict[int, dict]:
             for iid, share in zip(ids, shares):
                 final[iid] = share
     return final
+
+
+def fetch_resets(base: str, key: str, since: str | None, timeout: float = 15.0) -> list[dict]:
+    """查伺服器端「自己上次檢查之後，有沒有任何範圍被 Server 端 Reset 過」
+    （GET /issue_provenance/resets，Redmine #27260）。
+
+    回傳 [{"range_from":, "range_to":, "reset_at":}, ...]；哪些本機檔案的
+    哪些日期跟這些範圍重疊，交給呼叫端（見 _scan_and_send）自己判斷——這裡
+    只負責問到「發生過哪些 Reset」。
+
+    查詢本身失敗（網路、伺服器一時的問題）不讓整次執行中止：問不到跟「還
+    沒問到有 Reset」對這次掃描的影響相同——維持原本的去重行為，下次執行
+    再問一次，不會漏掉；服務中斷也不該讓日常的採集跟著停擺。
+    """
+    url = f"{base}/issue_provenance/resets.json"
+    if since:
+        url += f"?since={urllib.parse.quote(since)}"
+    req = urllib.request.Request(url, headers={"X-Redmine-API-Key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    resets = data.get("resets")
+    return resets if isinstance(resets, list) else []
+
+
+def days_in_range(range_from: str, range_to: str) -> set[str]:
+    """range_from～range_to（含端點，YYYY-MM-DD）展開成逐日的 ISO 字串集合。
+
+    用集合而不是直接比較區間邊界，是因為呼叫端要拿它跟 chunk["date"]／
+    segment["date"] 這種單一天的字串直接做 in 判斷——來自不同 Reset 範圍的
+    日期集合本來就該先聯集起來，用集合最自然。
+    """
+    start = dt.date.fromisoformat(range_from)
+    end = dt.date.fromisoformat(range_to)
+    days: set[str] = set()
+    d = start
+    while d <= end:
+        days.add(d.isoformat())
+        d += dt.timedelta(days=1)
+    return days
 
 
 def delete_issue_usage(base: str, key: str, issue_id: int, timeout: float = 15.0) -> dict:
@@ -1210,6 +1279,27 @@ def _scan_and_send(args) -> dict:
         print(f"演算法版本升級到 {ALGO_VERSION}（上次全量重掃是 "
               f"{state.get('rescanned_at_algo_version')}），本次自動做一次全量重新掃描")
 
+    # Server 端 Reset（Redmine #27260）：查有沒有任何範圍在自己上次檢查之後
+    # 被清空過。dry-run 不查——那時 key 是空字串，查了也只是白問，dry-run
+    # 本來就只是報告目前看得到什麼，不該有任何跟伺服器互動的副作用。
+    # --baseline 也不查：那個模式的既有保證是「不呼叫任何 API，只標記本地
+    # 狀態」（#27163），純粹是重新設定本機的起點，跟伺服器端發生過什麼
+    # Reset 是兩件不相干的事——baseline 之後的下一次正常執行，該有的
+    # 資料仍然一筆都不會少，只是慢一輪才問到。
+    resets = [] if (args.dry_run or args.baseline) else fetch_resets(
+        args.base, key, state.get("last_reset_check"))
+    reset_days: set[str] = set()
+    for r in resets:
+        reset_days |= days_in_range(r["range_from"], r["range_to"])
+    # None（從未查過）也要更新——第一次執行時 posted／daily_sent 都還是空的，
+    # 反應歷史 Reset 沒有東西可以重送，等於無操作，但仍要記下「查到這裡了」，
+    # 下次才不會重複整段歷史。resets 為空時沿用舊值：伺服器沒有新東西，
+    # 沒有理由往前推進查詢起點（沒有意義，但也沒有正確性上的必要）。
+    latest_reset_at = max((r["reset_at"] for r in resets), default=None)
+    if resets and not args.dry_run:
+        print(f"偵測到 {len(resets)} 筆 Server 端 Reset，涵蓋 {len(reset_days)} 天——"
+              "這些天會忽略本地既有的去重紀錄，強制重新掃描重送")
+
     files = sorted(PROJECTS_DIR.glob("*/*.jsonl"))
     scanned = skipped = 0
     to_send: list[tuple[int, dict]] = []
@@ -1222,7 +1312,21 @@ def _scan_and_send(args) -> dict:
     for path in files:
         stat = path.stat()
         fingerprint = f"{stat.st_mtime_ns}:{stat.st_size}"
-        main_stale = force_rescan or state["files"].get(str(path)) != fingerprint
+        file_genuinely_stale = state["files"].get(str(path)) != fingerprint
+        # reset_days 非空時也比照 force_rescan：不知道哪個檔案含有落在被
+        # Reset 範圍內的資料之前，唯一能不漏掉的做法是全部重新解析一次——
+        # 跟演算法版本升級的全量重掃是同一個道理，只是觸發原因不同，所以
+        # 不跟 force_rescan／auto_rescan 混在同一個變數裡，下面的送出判斷
+        # 需要分清楚「這次為什麼要重新看這個檔案」（Redmine #27260）。
+        main_stale = force_rescan or bool(reset_days) or file_genuinely_stale
+        # 自動觸發的全量重掃（演算法升級，非使用者手動帶 --rescan-all）對完全沒
+        # 動過的檔案，只補「有實際碰過議題」的部分——note_issue 的換題判定前提
+        # 是至少讀寫過一張議題，attribution=none 的段落結構上不可能被那個 bug
+        # 影響到，出現差異只會是這台機器同時有其他 session 在跑、檔案內容或
+        # 計算時機本身的雜訊，不是這次修法要處理的範圍（#27248 實測踩到：
+        # 55 億 token 的「none」台帳差異，追下去發現是量測當下的雜訊，不是這次
+        # 演算法差異）。手動帶 --rescan-all 的人是自己要看完整結果，不受此限制。
+        suppress_none_daily = auto_rescan and not args.rescan_all and not file_genuinely_stale
         # 批次校正（#27163）用自己的一份 fingerprint：這支功能是後來才加的，
         # 不能因為主掃描早就標記過某個檔案沒動過，就永遠不去補做這個檔案的
         # 批次校正——兩者獨立判斷，各自決定要不要重新處理這個檔案。演算法升級
@@ -1241,16 +1345,27 @@ def _scan_and_send(args) -> dict:
             scanned += 1
             if session_id is not None:
                 for seg in segments:
-                    if seg["journal_id"] in posted:
+                    # posted 正常擋掉已經送過的 journal——但如果這一則剛好落在
+                    # 被 Reset 的範圍內，伺服器那一列的用量欄位已經被清空，
+                    # 「本地記得送過」跟「伺服器上還在」不再是同一件事，這時
+                    # 要無視 posted、當作沒送過一樣重送（見 IssueProvenance#create：
+                    # 用量欄位是 NULL 時不會回 409，重送本來就會被接受）。
+                    if seg["journal_id"] in posted and seg.get("date") not in reset_days:
                         continue
                     to_send.append((seg["journal_id"], payload_for(seg, session_id)))
 
                 for chunk in merge_daily_chunks(day_chunks):
+                    if suppress_none_daily and chunk["attribution"] == "none":
+                        continue  # 見上：自動全量重掃不動這段，維持原有指紋，留給正常增量掃描處理
                     row_key = f"{path}::{chunk['date']}::{chunk['attribution']}::{chunk['issue_id']}"
                     row_fp = json.dumps(
                         [chunk["tokens"], chunk["requests"], chunk["prompts"], chunk["errors"]],
                         sort_keys=True)
-                    if daily_sent.get(row_key) == row_fp:
+                    # 同樣的道理：指紋相同代表「本地算出來的數字沒變」，但
+                    # Reset 清掉的是伺服器那一列，不是本地這份指紋所代表的
+                    # 計算結果——指紋比對在這裡不能拿來當作「不必重送」的
+                    # 理由，被 Reset 的日期一律重送一次。
+                    if chunk["date"] not in reset_days and daily_sent.get(row_key) == row_fp:
                         continue  # 自上次成功送出後沒有變化，不必重送
                     daily_items.append({"key": row_key, "fingerprint": row_fp,
                                          "payload": payload_for_daily(chunk, session_id)})
@@ -1284,7 +1399,8 @@ def _scan_and_send(args) -> dict:
         print(f"已將 {len(marked)} 筆既有區間（含每日台帳 {len(daily_items)} 筆）標記為已處理，未送出任何資料")
         print("往後只會送出新產生的用量")
         return {"exit_code": 0, "baseline": True,
-                "journal_baselined": len(marked), "daily_baselined": len(daily_items)}
+                "journal_baselined": len(marked), "daily_baselined": len(daily_items),
+                "resets": {"count": len(resets), "days": len(reset_days)}}
 
     sent = exists = failed = 0
     write_delivered_tokens = 0  # 驗收第八組：報表要能對得上帳，只算真的送達的
@@ -1376,6 +1492,11 @@ def _scan_and_send(args) -> dict:
         # 代表目前這個演算法版本已經對全部本機檔案生效過一次——往後除非又
         # 升版，不用再自動重掃。
         state["rescanned_at_algo_version"] = ALGO_VERSION
+        # 這一輪已經對 reset_days 涵蓋的日期強制重新掃描並重送過，下次不用
+        # 再重複問到同一批 Reset。resets 為空（沒有新 Reset）時不動這個值，
+        # 沿用上次查到的起點即可。
+        if latest_reset_at:
+            state["last_reset_check"] = latest_reset_at
         save_state(state)
 
     attributed = sum(sum(b["tokens"].values()) for _, b in queue)
@@ -1415,6 +1536,7 @@ def _scan_and_send(args) -> dict:
         "batch_correction": batch_correction,
         "reconcile": {"total": total, "delivered": delivered, "unprocessable": unprocessable},
         "rescan_all": force_rescan, "auto_rescan": auto_rescan, "algo_version": ALGO_VERSION,
+        "resets": {"count": len(resets), "days": len(reset_days)},
     }
 
 
