@@ -58,6 +58,7 @@ STATE_PATH = Path.home() / ".claude" / "nineder" / "ai_usage_state.json"
 KEY_PATH = Path.home() / ".claude" / "nineder" / "redmine_api_key"
 RUN_LOG_PATH = Path.home() / ".claude" / "nineder" / "collector_runs.jsonl"
 DAILY_REJECTED_LOG_PATH = Path.home() / ".claude" / "nineder" / "daily_usage_rejected.jsonl"
+WRITE_REJECTED_LOG_PATH = Path.home() / ".claude" / "nineder" / "write_ledger_rejected.jsonl"
 LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 
 # parse_transcript／note_issue 的歸屬演算法版本（#27248）。只在演算法本身
@@ -131,6 +132,10 @@ def load_state() -> dict:
     # None 代表從來沒查過——這台機器第一次執行，會拿到全部歷史 Reset，但
     # 那時 posted／daily_sent 也還是空的，沒有東西可以「重送」，等於無操作。
     state.setdefault("last_reset_check", None)
+    # 伺服器回 410（journal 已不存在，#27312）而隔離掉的 journal 編號。跟
+    # posted 分開：posted 會被 Reset 範圍繞過（那些天要重送），這裡不會——
+    # journal 刪了就不會回來，不管重掃幾次都不該再進佇列。
+    state.setdefault("gone", [])
     return state
 
 
@@ -994,8 +999,16 @@ def collapse_daily_items(items: list[dict]) -> list[dict]:
     return out
 
 
+class JournalGone(Exception):
+    """伺服器回 410：這則 journal 已不存在，重送永遠不會成功（#27312）。
+
+    跟一般例外分開，是因為 404 仍可能是權限問題（被移出專案、議題轉私有），
+    那種要留在 pending 繼續重試；只有 410 才確定可以隔離。
+    """
+
+
 def post(base: str, key: str, journal_id: int, body: dict, timeout: float = 15.0) -> str:
-    """回傳 'ok'、'exists'，或拋出例外讓呼叫端留待重試。"""
+    """回傳 'ok'、'exists'；410 拋 JournalGone，其他錯誤原樣拋出讓呼叫端留待重試。"""
     req = urllib.request.Request(
         f"{base}/ai_usage/journals/{journal_id}.json",
         data=json.dumps(body).encode(),
@@ -1010,7 +1023,31 @@ def post(base: str, key: str, journal_id: int, body: dict, timeout: float = 15.0
         # 採集器本來就該是安全的，把它當錯誤會讓每次執行都堆一批假警報。
         if exc.code == 409:
             return "exists"
+        if exc.code == 410:
+            raise JournalGone(exc.read().decode(errors="replace")) from exc
         raise
+
+
+def record_rejected_write_rows(gone: list[tuple[int, dict, str]]) -> None:
+    """把因 410 隔離的逐則寫入連同原因寫進獨立的紀錄檔（#27312）。
+
+    做法與 record_rejected_daily_rows 相同：不悄悄消失，事後查得到；寫檔
+    失敗不讓採集器本身報錯。
+    """
+    if not gone:
+        return
+    try:
+        WRITE_REJECTED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with WRITE_REJECTED_LOG_PATH.open("a") as fh:
+            for journal_id, payload, reason in gone:
+                fh.write(json.dumps({
+                    "rejected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "journal_id": journal_id,
+                    "reason": reason,
+                    "payload": payload,
+                }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def post_daily(base: str, key: str, rows: list[dict], timeout: float = 20.0) -> dict:
@@ -1267,6 +1304,7 @@ def main() -> int:
 def _scan_and_send(args) -> dict:
     state = load_state()
     posted = set(state.get("posted", []))
+    gone_ids = set(state.get("gone", []))
     daily_sent: dict[str, str] = state.get("daily_sent", {})
     correction_tracked: dict[str, str] = state["correction_files"]
     key = "" if args.dry_run else api_key()
@@ -1352,6 +1390,8 @@ def _scan_and_send(args) -> dict:
                     # 用量欄位是 NULL 時不會回 409，重送本來就會被接受）。
                     if seg["journal_id"] in posted and seg.get("date") not in reset_days:
                         continue
+                    if seg["journal_id"] in gone_ids:
+                        continue  # 已確認 journal 不存在（#27312），Reset 範圍也不例外
                     to_send.append((seg["journal_id"], payload_for(seg, session_id)))
 
                 for chunk in merge_daily_chunks(day_chunks):
@@ -1379,7 +1419,8 @@ def _scan_and_send(args) -> dict:
 
     # 上次沒送成功的先試，失敗的原因通常是暫時的
     retry = state.get("pending", [])
-    queue = [(e["journal_id"], e["payload"]) for e in retry if e["journal_id"] not in posted] + to_send
+    queue = [(e["journal_id"], e["payload"]) for e in retry
+             if e["journal_id"] not in posted and e["journal_id"] not in gone_ids] + to_send
     daily_items = collapse_daily_items(state.get("daily_pending", []) + daily_items)
 
     if args.baseline:
@@ -1405,6 +1446,7 @@ def _scan_and_send(args) -> dict:
     sent = exists = failed = 0
     write_delivered_tokens = 0  # 驗收第八組：報表要能對得上帳，只算真的送達的
     still_pending: list[dict] = []
+    gone_rows: list[tuple[int, dict, str]] = []
     for journal_id, body in queue:
         if args.dry_run:
             if args.verbose:
@@ -1423,6 +1465,13 @@ def _scan_and_send(args) -> dict:
                 sent += 1
             if args.verbose:
                 print(f"  journal {journal_id}: {result}")
+        except JournalGone as exc:
+            # 不算 failed、不放回 pending：重送永遠不會成功，留著只會讓每次
+            # 執行都以 exit_code 1 收場，把真正需要處理的失敗淹沒掉（#27312）。
+            gone_ids.add(journal_id)
+            gone_rows.append((journal_id, body, str(exc)))
+            if args.verbose:
+                print(f"  journal {journal_id}: 已不存在，隔離")
         except Exception as exc:  # noqa: BLE001
             failed += 1
             still_pending.append({"journal_id": journal_id, "payload": body})
@@ -1487,6 +1536,8 @@ def _scan_and_send(args) -> dict:
 
     state["posted"] = sorted(posted)
     state["pending"] = still_pending
+    state["gone"] = sorted(gone_ids)
+    record_rejected_write_rows(gone_rows)
     if not args.dry_run:
         # 這次是完整跑過一輪（不是 dry-run），且沒有中途拋例外才會走到這裡，
         # 代表目前這個演算法版本已經對全部本機檔案生效過一次——往後除非又
@@ -1512,7 +1563,9 @@ def _scan_and_send(args) -> dict:
         print(f"待送出：寫入紀錄表 {len(queue)} 筆、每日台帳 {len(daily_items)} 筆"
               "（dry-run，未送出也未寫入狀態）")
     else:
-        print(f"寫入紀錄表：送出 {sent}，已存在 {exists}，失敗待重試 {failed}")
+        print(f"寫入紀錄表：送出 {sent}，已存在 {exists}，失敗待重試 {failed}"
+              + (f"；隔離 {len(gone_rows)} 筆 journal 已不存在（見 {WRITE_REJECTED_LOG_PATH}）"
+                 if gone_rows else ""))
         if daily_report:
             print(f"每日台帳：{daily_report}")
         # 驗收第八組：四個數字要能對得上帳——送達的兩邊相加，加上仍然無法
@@ -1529,8 +1582,8 @@ def _scan_and_send(args) -> dict:
     return {
         "exit_code": 1 if (failed or batch_correction["failed"]) else 0,
         "scanned": scanned, "skipped": skipped,
-        "write_ledger": {"sent": sent, "exists": exists, "failed": failed, "tokens": attributed,
-                          "delivered_tokens": write_delivered_tokens},
+        "write_ledger": {"sent": sent, "exists": exists, "failed": failed, "gone": len(gone_rows),
+                          "tokens": attributed, "delivered_tokens": write_delivered_tokens},
         "daily_ledger": {"rows": len(daily_items), "tokens": daily_total, "result": daily_report,
                           "delivered_tokens": daily_delivered_tokens},
         "batch_correction": batch_correction,
