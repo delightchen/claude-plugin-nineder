@@ -26,6 +26,9 @@ MCP 寫入」，還多了兩種——跨過日期邊界、或換了一張不同�
 
 需要 ~/.claude/nineder/redmine_api_key，或環境變數 REDMINE_API_KEY。
 
+散布（#27320）：本檔只在 issue_provenance 改，合併進 main 後由 CI 自動同步到
+nineder/claude/plugin，再經 GitHub 鏡像與組織派發送到每台電腦。不要直接改 plugin 那份。
+
 排程（#27090 驗收第九組）：不用 cron/launchd 固定時間跑，改成三個事件
 觸發，都指向同一個「上次跑到現在」的動作，只是誰按下啟動鍵不同——
 daily_trigger.py（每天第一個 session 啟動時）、resolved_trigger.py（議題
