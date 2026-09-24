@@ -62,10 +62,56 @@ SELF_SKILL = SKILLS_DIR / "nineder-skill"
 STABLE_BIN = HOME / ".claude" / "nineder" / "bin"
 SETTINGS_PATH = HOME / ".claude" / "settings.json"
 
-PLUGIN_ROOT = Path(
-    os.environ.get("CLAUDE_PLUGIN_ROOT")
-    or str(Path(__file__).resolve().parent.parent)
-)
+def _redmine_plugin_version(root: Path) -> tuple[int, ...] | None:
+    try:
+        d = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        if d.get("name") != "redmine" or not (root / "scripts" / "bootstrap.sh").exists():
+            return None
+        return tuple(int(x) for x in str(d.get("version", "")).split("."))
+    except Exception:
+        return None
+
+
+def _candidate_plugin_roots() -> list[Path]:
+    # 桌面版組織派發的目錄含 session id；Windows 那條（%APPDATA%\Claude）尚未實機確認。
+    desktop_bases = [HOME / "Library" / "Application Support" / "Claude"]
+    if os.environ.get("APPDATA"):
+        desktop_bases.append(Path(os.environ["APPDATA"]) / "Claude")
+    roots: list[Path] = []
+    for base in desktop_bases:
+        roots += base.glob("local-agent-mode-sessions/*/*/rpm/*")
+    plugins = HOME / ".claude" / "plugins"
+    roots.append(plugins / "marketplaces" / "nineder" / "redmine")
+    roots += (plugins / "cache" / "nineder" / "redmine").glob("*")
+    return roots
+
+
+def resolve_plugin_root() -> Path:
+    """取本機所有 redmine plugin 目錄中版本最高的一份（#27320）。
+
+    從 settings.json 的 SessionStart 執行時，這支檔案在 ~/.claude/nineder/bin/，
+    上一層沒有 scripts/，而桌面版不執行 plugin 自己的 hook，CLAUDE_PLUGIN_ROOT
+    永遠不會被設定——不主動去找，bin/ 就永遠不會更新。反過來 CLAUDE_PLUGIN_ROOT
+    可能指向很久沒更新的 CLI cache，也不能無條件相信它，否則會把 bin/ 蓋回舊版。
+    """
+    own = Path(__file__).resolve().parent.parent
+    env = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    first = [Path(env)] if env else []
+    best: tuple[tuple[int, ...], Path] | None = None
+    try:
+        candidates = first + [own] + _candidate_plugin_roots()
+    except Exception:
+        candidates = first + [own]
+    for root in candidates:
+        v = _redmine_plugin_version(root)
+        if v is not None and (best is None or v > best[0]):
+            best = (v, root)
+    if best:
+        return best[1]
+    return first[0] if first else own
+
+
+PLUGIN_ROOT = resolve_plugin_root()
 
 # 複製到 ~/.claude/nineder/bin/ 的完整清單。bootstrap.py 自己也在清單裡——
 # SessionStart 的自我重呼叫一律指向這份穩定副本，不指向 plugin 目錄（後者含
