@@ -1053,6 +1053,53 @@ def record_rejected_write_rows(gone: list[tuple[int, dict, str]]) -> None:
         pass
 
 
+def retry_rejected(base: str, key: str, dry_run: bool = False,
+                   path: Path | None = None) -> dict:
+    """重放因 410 隔離的逐則寫入（#27561）。
+
+    伺服器現在對「journal 已被刪除、但那一列的用量是空的」這種情況會接受補寫
+    （回 201），其餘仍回 410。所以隔離檔裡的紀錄可以安全重送：補回的從檔案裡
+    移除，伺服器說已有用量（409）的也移除，仍回 410 或暫時性失敗的留著。
+    dry_run 只列出，不送出也不改檔。"""
+    path = path or WRITE_REJECTED_LOG_PATH
+    result = {"recovered": 0, "exists": 0, "still_gone": 0, "failed": 0, "total": 0}
+    if not path.exists():
+        return result
+    entries = []
+    for line in path.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                continue
+    result["total"] = len(entries)
+    kept = []
+    for e in entries:
+        jid = e.get("journal_id")
+        tokens = (e.get("payload") or {}).get("tokens", {})
+        if dry_run:
+            print(f"  journal {jid}  token 合計 {sum(tokens.values()):,}  （dry-run，未送出）")
+            kept.append(e)
+            continue
+        try:
+            outcome = post(base, key, jid, e["payload"])
+        except JournalGone:
+            result["still_gone"] += 1
+            kept.append(e)
+            continue
+        except Exception as exc:  # noqa: BLE001 — 暫時性失敗：留著，下次再試
+            result["failed"] += 1
+            kept.append(e)
+            print(f"  journal {jid} 失敗：{exc}", file=sys.stderr)
+            continue
+        result["recovered" if outcome == "ok" else "exists"] += 1
+    if not dry_run:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in kept))
+        tmp.replace(path)
+    return result
+
+
 def post_daily(base: str, key: str, rows: list[dict], timeout: float = 20.0) -> dict:
     """送一批每日台帳列。伺服器整批一個交易——任何一列不合法就整批拒絕。
 
@@ -1248,6 +1295,9 @@ def main() -> int:
                          "（撿漏＋修正舊演算法算錯的部分；posted／daily_sent 的防重送機制"
                          "照舊生效，不影響任何已經正確送達的紀錄）。ALGO_VERSION 提升時，"
                          "任何一次正常執行都會自動觸發一次，不必手動加這個旗標，見 #27248")
+    ap.add_argument("--retry-rejected", action="store_true",
+                    help="重放因 410 隔離的逐則寫入（#27561）：伺服器端該列用量為空的會被補回，"
+                         "其餘留在隔離檔。搭配 --dry-run 只列出不送出")
     ap.add_argument("--trigger", default="manual",
                     help="這次執行是誰觸發的（manual／session_start／issue_resolved／…），"
                          "只用來寫進執行紀錄，不影響行為")
@@ -1255,6 +1305,13 @@ def main() -> int:
 
     if args.pending:
         return emit_pending(args.session)
+
+    if args.retry_rejected:
+        key = "" if args.dry_run else api_key()
+        r = retry_rejected(args.base, key, args.dry_run)
+        print(f"隔離檔共 {r['total']} 筆：補回 {r['recovered']}、伺服器已有 {r['exists']}、"
+              f"仍已不存在 {r['still_gone']}、暫時失敗 {r['failed']}")
+        return 0 if r["failed"] == 0 else 1
 
     if args.correct_batch:
         # 手動、一次性的動作，不是排程掃描——不搶鎖也不寫執行紀錄，跟
