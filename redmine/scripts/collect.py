@@ -78,6 +78,12 @@ LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 #      （批次校正，#27163）負責，兩邊都記會讓同一段用量算兩次（#27562）
 ALGO_VERSION = 3
 
+# 每次呼叫伺服器都帶上自己的演算法版本（Redmine #27562）。Server 端 Reset 要靠各台
+# 重送補回資料，重送的是哪一版算法，決定補回來的是對的還是舊的錯誤；伺服器在
+# collector 每次執行一定會呼叫的兩個端點（查 Reset、每日上傳）記下來，管理頁才查得到
+# 「哪幾台還沒更新」。
+VERSION_HEADER = {"X-Collector-Algo": str(ALGO_VERSION)}
+
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 MCP_PREFIX = "mcp__nineder-redmine__"
 CREATE_ISSUE_TOOL = MCP_PREFIX + "create_issue"
@@ -753,7 +759,7 @@ def fetch_resets(base: str, key: str, since: str | None, timeout: float = 15.0) 
     url = f"{base}/issue_provenance/resets.json"
     if since:
         url += f"?since={urllib.parse.quote(since)}"
-    req = urllib.request.Request(url, headers={"X-Redmine-API-Key": key})
+    req = urllib.request.Request(url, headers={"X-Redmine-API-Key": key, **VERSION_HEADER})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
@@ -1123,7 +1129,7 @@ def post_daily(base: str, key: str, rows: list[dict], timeout: float = 20.0) -> 
     req = urllib.request.Request(
         f"{base}/issue_provenance/daily.json",
         data=json.dumps({"rows": rows}).encode(),
-        headers={"X-Redmine-API-Key": key, "Content-Type": "application/json"},
+        headers={"X-Redmine-API-Key": key, "Content-Type": "application/json", **VERSION_HEADER},
         method="POST",
     )
     try:
