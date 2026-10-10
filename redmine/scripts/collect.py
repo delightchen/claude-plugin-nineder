@@ -260,6 +260,17 @@ def usage_fields(bucket: dict) -> dict:
     }
 
 
+def usage_is_zero(usage: dict) -> bool:
+    """四個計價欄位全為 0 的 usage。
+
+    同一個 requestId 會拆成多行寫入，各行重複同一份完整 usage；偶爾尾端多一行
+    全 0 的佔位（#27248：實測 34,802 個多行 requestId 裡有 8 個）。這種行不是
+    「較小的用量」，是沒有內容的佔位，不能拿來蓋掉前面的真實數字。
+    """
+    return not any(usage.get(k) for k in
+                   ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
 def add_usage(bucket: dict, usage: dict, model, effort) -> None:
     cc = usage.get("cache_creation") or {}
     w1h = cc.get("ephemeral_1h_input_tokens", 0)
@@ -461,7 +472,7 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                                 inflight_writes.add(blk["id"])
 
                 usage = msg.get("usage") or {}
-                if rid and usage and (rid == pending_rid or rid not in seen_requests):
+                if rid and usage and not usage_is_zero(usage) and (rid == pending_rid or rid not in seen_requests):
                     # 同一回合還沒落地（rid == pending_rid）就繼續覆蓋，理論上是同一份
                     # 數字；已經落地過的 requestId（見上面 4.1.9 的說明）不重新排。
                     seen_requests.add(rid)
@@ -643,7 +654,7 @@ def parse_creation_events(path: Path) -> tuple[list[dict], str | None]:
 
                 rid = rec.get("requestId")
                 usage = msg.get("usage") or {}
-                if rid and usage and rid not in seen_requests:
+                if rid and usage and not usage_is_zero(usage) and rid not in seen_requests:
                     seen_requests.add(rid)
                     add_usage(bucket, usage, msg.get("model"), rec.get("effort"))
 
