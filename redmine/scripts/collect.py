@@ -84,6 +84,11 @@ ALGO_VERSION = 3
 # 「哪幾台還沒更新」。
 VERSION_HEADER = {"X-Collector-Algo": str(ALGO_VERSION)}
 
+# 寫入還在進行中（tool_use 已出現、tool_result 還沒回來）時掃描到檔案尾端，那一段
+# 先不送進每日台帳（Redmine #27562）。檔案超過這麼久沒動，視為那次寫入不會有結果了
+# （對話中斷），照舊把尾端那一段記為 write，不讓它消失。
+INFLIGHT_WRITE_GRACE_SECONDS = 10 * 60
+
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 MCP_PREFIX = "mcp__nineder-redmine__"
 CREATE_ISSUE_TOOL = MCP_PREFIX + "create_issue"
@@ -382,6 +387,9 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
     但同一個 requestId 一旦排過一次，之後不管再出現幾次都不會重新排。
     """
     pending_tool: dict[str, str] = {}   # tool_use_id -> 工具名
+    # 已經呼叫、但回應還沒出現在檔案裡的寫入（#27562）。檔案掃到尾端時若還有，
+    # 代表正好掃在一次寫入進行中。
+    inflight_writes: set[str] = set()
     seen_requests: set[str] = set()     # 哪些 requestId 已經排進過 pending_usage，防止重複計算
     segments: list[dict] = []
     day_chunks: list[dict] = []
@@ -450,6 +458,7 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                             iid = coerce_issue_id(inp.get(field))
                             if iid is not None:
                                 bucket = note_issue(bucket, iid, "write", day_chunks)
+                                inflight_writes.add(blk["id"])
 
                 usage = msg.get("usage") or {}
                 if rid and usage and (rid == pending_rid or rid not in seen_requests):
@@ -469,6 +478,7 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                 for blk in content:
                     if not isinstance(blk, dict) or blk.get("type") != "tool_result":
                         continue
+                    inflight_writes.discard(blk.get("tool_use_id"))
                     if blk.get("is_error"):
                         bucket["errors"] += 1
                     for entry in write_ledger_entries(blk, pending_tool):
@@ -509,6 +519,18 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
     flush_usage()  # 檔案掃到底，最後一回合的 usage 也要落地，不能留在 pending 裡消失。
     leftover = None if is_empty(bucket) else usage_fields(bucket)
     tail_chunk = finalize_chunk(bucket)
+    if tail_chunk is not None and tail_chunk["attribution"] == "write" and inflight_writes:
+        # 掃在一次寫入進行中（#27562）：這一段馬上就會因為回應帶回 journal 編號而
+        # 變成那則 journal 的用量。現在送成台帳的 write 分塊，之後它就同時存在於
+        # 兩張表，而且之後的掃描不會再產生這個分塊，伺服器上那一列沒有人會撤回。
+        # 先不送，等回應出現的下一次掃描自然會把它算對。檔案太久沒動則視為那次
+        # 寫入不會有結果（對話中斷），照舊記下。
+        try:
+            idle = time.time() - path.stat().st_mtime
+        except OSError:
+            idle = INFLIGHT_WRITE_GRACE_SECONDS + 1
+        if idle < INFLIGHT_WRITE_GRACE_SECONDS:
+            tail_chunk = None
     if tail_chunk is not None:
         day_chunks.append(tail_chunk)
     return segments, leftover, session_id, day_chunks
