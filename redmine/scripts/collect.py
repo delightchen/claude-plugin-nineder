@@ -74,7 +74,9 @@ LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 # 錯誤歸屬，不是砍掉重練。
 #   1：#27090 之前的原始版本
 #   2：修 note_issue 換題判定偷走同一回合自己用量的 bug（#27248）
-ALGO_VERSION = 2
+#   3：create_issue 的那一段用量不再進每日台帳的 write 分塊——它由建立事件那一列
+#      （批次校正，#27163）負責，兩邊都記會讓同一段用量算兩次（#27562）
+ALGO_VERSION = 3
 
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 MCP_PREFIX = "mcp__nineder-redmine__"
@@ -481,8 +483,18 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                             # 確實寫入過，但沒有 journal 可掛（多半是 create_issue）。
                             # 這是有正面證據的歸屬，送進每日台帳而不是留著等下一次
                             # MCP 寫入把它糊在不相干的那一則上（#27090 驗收第五組）。
+                            #
+                            # 例外：create_issue 的這一段不送（#27562）。它的用量
+                            # 由議題建立事件那一列負責——即時 hook 在建立當下帶上
+                            # 一次，批次校正（parse_creation_events／#27163）對每一
+                            # 次 create_issue 又 DELETE＋POST 覆蓋一次。這裡若再送
+                            # 一份 write 分塊，同一段用量就同時在 issue_provenances
+                            # 與 ai_daily_usages 各記一次，違反兩表互斥（#27067 驗收
+                            # 第九組）。區間照樣要結算、bucket 照樣要歸零，否則這段
+                            # 用量會滾進下一個區間被算兩次，只是不放進 day_chunks。
                             chunk = finalize_chunk(bucket)
-                            if chunk is not None:
+                            owned_by_creation_row = pending_tool.get(blk.get("tool_use_id")) == CREATE_ISSUE_TOOL
+                            if chunk is not None and not owned_by_creation_row:
                                 day_chunks.append(chunk)
                             carried_date = bucket["date"]
                             bucket = new_bucket()
@@ -1405,7 +1417,7 @@ def _scan_and_send(args) -> dict:
     # 議題組成，用來判斷這筆資料自上次送出後有沒有變過，不必每次都重送。
     daily_items: list[dict] = []
     # 每一筆：(session_id, compute_batch_correction 算出來的 {issue_id: usage} 字典)。
-    batch_todo: list[tuple[str, dict[int, dict]]] = []
+    batch_todo: list[tuple[str, dict[int, dict], str]] = []
 
     for path in files:
         stat = path.stat()
@@ -1475,7 +1487,7 @@ def _scan_and_send(args) -> dict:
             events, csession_id = parse_creation_events(path)
             correction_tracked[str(path)] = fingerprint
             if events and csession_id:
-                batch_todo.append((csession_id, compute_batch_correction(events)))
+                batch_todo.append((csession_id, compute_batch_correction(events), str(path)))
 
     # 上次沒送成功的先試，失敗的原因通常是暫時的
     retry = state.get("pending", [])
@@ -1586,13 +1598,17 @@ def _scan_and_send(args) -> dict:
     # 就是覆蓋式的，沒有「已存在就跳過」的必要，也沒有 pending 重試佇列；
     # 單筆失敗只影響那一張議題，不影響同一批裡的其他張。
     batch_correction = {"sessions": 0, "corrected": 0, "skipped": 0, "failed": 0}
-    for csession_id, final in batch_todo:
+    for csession_id, final, cpath in batch_todo:
         if not final:
             continue
         batch_correction["sessions"] += 1
         r = apply_batch_corrections(final, csession_id, args.base, key, args.dry_run, args.verbose)
         for k in ("corrected", "skipped", "failed"):
             batch_correction[k] += r[k]
+        if r["failed"] and not args.dry_run:
+            # create_issue 的用量只剩這一條路徑（#27562）：校正有任何一張送失敗，
+            # 就別把這個檔案標成「校正過了」，下次執行才會再試一次，不會永遠漏記。
+            correction_tracked.pop(cpath, None)
 
     state["posted"] = sorted(posted)
     state["pending"] = still_pending
