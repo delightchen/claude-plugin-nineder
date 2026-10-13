@@ -401,6 +401,9 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
     # 已經呼叫、但回應還沒出現在檔案裡的寫入（#27562）。檔案掃到尾端時若還有，
     # 代表正好掃在一次寫入進行中。
     inflight_writes: set[str] = set()
+    # 在途寫入各自是哪一個回合（requestId）發出的。同一回合平行發出的多個工具呼叫
+    # 要視為同一批（#27562 第三條路徑），不能因為它們指名不同議題就在中間切開。
+    inflight_write_rid: dict[str, str | None] = {}
     seen_requests: set[str] = set()     # 哪些 requestId 已經排進過 pending_usage，防止重複計算
     segments: list[dict] = []
     day_chunks: list[dict] = []
@@ -460,16 +463,25 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                     pending_tool[blk["id"]] = name
                     short = name[len(MCP_PREFIX):]
                     inp = blk.get("input") or {}
+                    # 同一回合已經有寫入在途（#27562 第三條路徑）：這一批平行呼叫要當成一件
+                    # 事。PreToolUse hook 在第一個呼叫發出時只看得到第一個 tool_use，會把整段
+                    # 累積用量掛給它的 journal；解析器若在後面的 tool_use 就因「換題」把這段
+                    # 結算進台帳，那段用量就同時記在 journal 與台帳兩處。所以這一批裡後出現的
+                    # 呼叫不在 tool_use 階段換題，議題歸屬改由各自 tool_result 的 write_ledger
+                    # 決定（沿用只有第一則 journal 承載用量的不對稱規則）。
+                    same_batch = bool(rid) and rid in inflight_write_rid.values()
                     if short in READ_ISSUE_TOOLS:
                         iid = coerce_issue_id(inp.get(READ_ISSUE_TOOLS[short]))
-                        if iid is not None:
+                        if iid is not None and not same_batch:
                             bucket = note_issue(bucket, iid, "read", day_chunks)
                     elif short in WRITE_ISSUE_TOOLS:
                         for field in WRITE_ISSUE_TOOLS[short]:
                             iid = coerce_issue_id(inp.get(field))
                             if iid is not None:
-                                bucket = note_issue(bucket, iid, "write", day_chunks)
+                                if not same_batch:
+                                    bucket = note_issue(bucket, iid, "write", day_chunks)
                                 inflight_writes.add(blk["id"])
+                                inflight_write_rid[blk["id"]] = rid
 
                 usage = msg.get("usage") or {}
                 if rid and usage and not usage_is_zero(usage) and (rid == pending_rid or rid not in seen_requests):
@@ -490,6 +502,7 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                     if not isinstance(blk, dict) or blk.get("type") != "tool_result":
                         continue
                     inflight_writes.discard(blk.get("tool_use_id"))
+                    inflight_write_rid.pop(blk.get("tool_use_id"), None)
                     if blk.get("is_error"):
                         bucket["errors"] += 1
                     for entry in write_ledger_entries(blk, pending_tool):
