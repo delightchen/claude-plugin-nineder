@@ -21,6 +21,12 @@ ai_usage」，而那句「記得」就是它失效的地方——正式站 1,287
 3. 永遠不要擋下寫入。記帳失敗的代價是少一筆用量；擋下寫入的代價是使用者的東西
    寫不進去。這與 plugin 那邊寫入點包 rescue 的理由是同一個。
 
+#27641：MCP 新增 update_issue_note（修改既有 note）後，settings.json 的 matcher
+要多收這一支，本檔不必改——它只負責把 ai_usage 併進 tool_input，不認工具名。
+伺服器把那份用量記成一列「修改記錄」（issue_provenance_note_edits），不碰原
+journal 那一列。該次修改被拒絕時，用量不會被消耗：collect.py 要看到成功回應裡
+的 write_ledger 才把那一段結算，所以它仍留在下一次可帶出的區間。
+
 本檔跟 collect.py 一起由 bootstrap.sh 複製到 ~/.claude/nineder/bin/（穩定位置，
 理由與 bootstrap.sh／issue_context.sh 相同：組織派發的 plugin 路徑含 session id、
 每次開對話都會變）。COLLECTOR 因此用同目錄下的 collect.py，不寫死路徑。
