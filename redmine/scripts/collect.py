@@ -92,6 +92,9 @@ INFLIGHT_WRITE_GRACE_SECONDS = 10 * 60
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 MCP_PREFIX = "mcp__nineder-redmine__"
 CREATE_ISSUE_TOOL = MCP_PREFIX + "create_issue"
+# 修改既有 note（#27641）。它的用量只經由 ai_usage_inline.py 夾帶、由伺服器記成
+# 一列「修改記錄」；這邊只負責把那一段結算掉，不再往 journal 或台帳送第二份。
+EDIT_NOTE_TOOL = MCP_PREFIX + "update_issue_note"
 
 # 哪些工具呼叫「讀過」或「寫過」一張議題，以及議題編號放在呼叫參數的哪個欄位。
 # 全部取自呼叫本身，不靠事後解析回應——呼叫當下就是事實，不必比對。
@@ -106,6 +109,7 @@ READ_ISSUE_TOOLS: dict[str, str] = {
 }
 WRITE_ISSUE_TOOLS: dict[str, tuple[str, ...]] = {
     "update_issue": ("issue_id",),
+    "update_issue_note": ("issue_id",),
     "delete_issue": ("issue_id",),
     "add_watcher": ("issue_id",),
     "remove_watcher": ("issue_id",),
@@ -508,6 +512,21 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                     for entry in write_ledger_entries(blk, pending_tool):
                         bucket = note_issue(bucket, entry["issue_id"], "write", day_chunks)
                         jid = entry["journal_id"]
+                        if pending_tool.get(blk.get("tool_use_id")) == EDIT_NOTE_TOOL:
+                            # 修改既有 note（#27641）：伺服器確認寫入了（回應帶
+                            # write_ledger），這一段用量就算結算掉，bucket 歸零。
+                            # 但不送進 segments——journal 那一列的用量是「寫那則
+                            # note 花了多少」，已定案，不能被修改的用量填上或蓋掉；
+                            # 也不送進台帳——修改有明確的 journal 掛載點，正面證據
+                            # 只在即時 hook 夾帶的那一份，補送第二份會重複計帳。
+                            #
+                            # 被拒絕的修改（403／404／410／422）回應沒有
+                            # write_ledger，根本走不到這裡，那一段留在 bucket 裡，
+                            # 下一次寫入照常帶出：不遺失，也不重複（驗收第四組）。
+                            carried_date = bucket["date"]
+                            bucket = new_bucket()
+                            bucket["date"] = carried_date
+                            continue
                         if jid is not None:
                             if not is_empty(bucket):
                                 # date 不是伺服器需要的欄位（payload_for 不會
