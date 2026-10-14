@@ -28,7 +28,7 @@ plugin 在 v2 之後只剩這一支入口，做六件事，順序固定：
   2. seed：~/.claude/skills/nineder-skill/ 不存在就從 plugin 的 seed/ 種下去（存在就完全
      不碰，之後由 Redmine 附檔自我升版——plugin 永遠不覆寫已安裝的版本）
   3. settings：冪等維護 ~/.claude/settings.json 的 UserPromptSubmit、SessionStart，
-     PreToolUse 的 create_issue／update_issue 自動夾帳，以及 SessionStart 的每日
+     PreToolUse 的 create_issue／update_issue／update_issue_note 自動夾帳，以及 SessionStart 的每日
      用量排程、PostToolUse 的議題轉 Resolved 排程（4.1.0 起 hook 指令一律用本檔案
      旁邊的 run_if_exists.py 當轉接殼，不再依賴任何殼層變數展開或條件判斷語法——
      這是這一版讓排程理論上可以在 Windows 上運作的關鍵改動，見下方 build_hooks_want()）
@@ -249,6 +249,10 @@ def build_hooks_want() -> tuple[
     want_matched: list[tuple[str, str, str]] = [
         ("PreToolUse", "mcp__nineder-redmine__create_issue", "ai_usage_inline.py"),
         ("PreToolUse", "mcp__nineder-redmine__update_issue", "ai_usage_inline.py"),
+        # 修改既有 note（#27641）：同一支 hook，伺服器把夾帶的用量記成一列「修改記錄」，
+        # 不碰原 journal 那一列。需要 collect.py 認得這支工具（4.1.19 起），否則修改成功後
+        # 那段用量會被當成原 journal 的用量去送——所以 matcher 與 collect.py 同版出貨。
+        ("PreToolUse", "mcp__nineder-redmine__update_issue_note", "ai_usage_inline.py"),
         ("PostToolUse", "mcp__nineder-redmine__update_issue", "resolved_trigger.py"),
     ]
     want_matched_cmds = {script: py_cmd(script) for _, _, script in want_matched}
