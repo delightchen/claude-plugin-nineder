@@ -22,7 +22,7 @@ App 中繼檔（claude-code-sessions/**/local_*.json）裡的 cliSessionId 欄�
 4. note 裡已經有回程連結（本服務的 mcp.nineder.com/s/，或舊的 Cloudflare Worker 網址，例如
    session-notify skill 已經附了）就不再加第二條。
 
-沒有遠端控制編號時（這個 session 沒開過遠端控制）連結退回 /s/<local_ 編號>，並在標題行註明
+沒有遠端控制編號時（這個 session 沒開過遠端控制）連結不帶 ?r=，並在標題行註明
 「請在電腦上點」——手機點那種連結只會看到提示頁，不註明使用者會以為壞了。
 
 連結服務不存任何資料、不認人（Redmine #27754）；本檔也不把任何編號寫進日誌，只記放棄原因。
@@ -101,9 +101,15 @@ def find_app_session(cli_session_id=None, local_id=None):
 
 
 def build_block(local_id, remote_id):
-    """要接在 note 後面的兩行。有遠端控制編號用單一編號形式，電腦與手機通用；沒有就只能電腦點。"""
+    """要接在 note 後面的兩行。連結一律是 /s/<local_>，有遠端控制編號就加 ?r=<session_>。
+
+    不能只放一個 session_ 編號：桌面 App 的 claude://code/continue 只收 local_ 編號，收到 session_
+    會在 main.log 記「code entry link invalid ?session」並丟掉，使用者按了開啟什麼都不會發生
+    （2026-10-19 實測，nineder/mcp !28 因此還原）。手機版 claude://code/<session-id> 才收 session_，
+    所以服務依 User-Agent 分流：電腦看路徑的 local_，手機看 r。
+    """
     if remote_id:
-        return f"{LABEL}\n{BASE}{remote_id}"
+        return f"{LABEL}\n{BASE}{local_id}?r={remote_id}"
     return f"{LABEL_DESKTOP_ONLY}\n{BASE}{local_id}"
 
 

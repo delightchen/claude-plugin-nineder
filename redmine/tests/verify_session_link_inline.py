@@ -57,14 +57,15 @@ def note_of(out):
 
 
 rc, out = run(ev("內容", "cli-one"))
-check("有遠端編號：補單一編號連結", rc == 0 and note_of(out) == "內容\n\n↩︎ 回到這個 session\nhttps://mcp.nineder.com/s/session_01BsEjSMwL7P7P5H5cLE8Eqq")
+check("有遠端編號：/s/<local_>?r=<session_>（電腦看路徑、手機看 r）", rc == 0 and note_of(out) == "內容\n\n↩︎ 回到這個 session\nhttps://mcp.nineder.com/s/local_eeee?r=session_01BsEjSMwL7P7P5H5cLE8Eqq")
 check("其他參數原封不動", json.loads(out)["hookSpecificOutput"]["updatedInput"]["channels"] == "telegram")
 check("結尾多餘換行不會疊空行", note_of(run(ev("內容\n\n\n", "cli-one"))[1]).startswith("內容\n\n↩︎"))
-check("沒開遠端控制：local_ 連結加請在電腦上點",
+check("沒開遠端控制：不帶 r，加請在電腦上點",
       note_of(run(ev("x", "cli-none"))[1]).endswith("（請在電腦上點）\nhttps://mcp.nineder.com/s/local_aaaa-bbbb"))
-check("沒有 bridgeSessionIds 欄位也行", "local_cccc" in run(ev("x", "cli-nofield"))[1])
+check("沒有 bridgeSessionIds 欄位也行", "local_cccc" in run(ev("x", "cli-nofield"))[1] and "?r=" not in run(ev("x", "cli-nofield"))[1])
+check("路徑絕不放 session_ 編號（桌面 continue 只收 local_）", "/s/session_" not in run(ev("x", "cli-one"))[1])
 out = run(ev("x", "cli-multi"))[1]
-check("多個遠端編號取最後一個", "session_new000000000000000000BB" in out and "session_old" not in out)
+check("多個遠端編號取最後一個，路徑仍是 local_", "local_dddd?r=session_new000000000000000000BB" in out and "session_old" not in out)
 
 for name, note in [("已有本服務連結", "看 https://mcp.nineder.com/s/local_x"),
                    ("已有舊 Worker 連結", "https://claude-session-link.nineder.workers.dev/s/abc"),
