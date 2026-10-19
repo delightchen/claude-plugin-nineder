@@ -15,7 +15,7 @@ usage 欄位有 token，MCP 寫入回應的 write_ledger 有 journal 編號。
 
 沒有 journal 可掛的部分（#27090）：一段用量結算的時機不再只有「遇到一次
 MCP 寫入」，還多了兩種——跨過日期邊界、或換了一張不同的議題。三種結算都
-會把累積量算清楚；前者送進既有的 /ai_usage/journals/:id，後兩者送進每日
+會把累積量算清楚；前者送進 /issue_provenance/journals/:id（#27065 起；原 /ai_usage/journals/:id），後兩者送進每日
 台帳 /issue_provenance/daily（見 payload_for_daily 與 merge_daily_chunks）。
 
 跑法：
@@ -1096,7 +1096,7 @@ class JournalGone(Exception):
 def post(base: str, key: str, journal_id: int, body: dict, timeout: float = 15.0) -> str:
     """回傳 'ok'、'exists'；410 拋 JournalGone，其他錯誤原樣拋出讓呼叫端留待重試。"""
     req = urllib.request.Request(
-        f"{base}/ai_usage/journals/{journal_id}.json",
+        f"{base}/issue_provenance/journals/{journal_id}.json",
         data=json.dumps(body).encode(),
         headers={"X-Redmine-API-Key": key, "Content-Type": "application/json"},
         method="POST",
