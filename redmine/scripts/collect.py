@@ -76,7 +76,10 @@ LOCK_PATH = Path.home() / ".claude" / "nineder" / "collector.lock"
 #   2：修 note_issue 換題判定偷走同一回合自己用量的 bug（#27248）
 #   3：create_issue 的那一段用量不再進每日台帳的 write 分塊——它由建立事件那一列
 #      （批次校正，#27163）負責，兩邊都記會讓同一段用量算兩次（#27562）
-ALGO_VERSION = 3
+#   4：Bash 工具呼叫期間伺服器記到的本人 API 寫入（curl／python／node）也算寫入證據，
+#      那段用量掛到該寫入的 journal，不再落進每日台帳（#28065）；台帳裡先前已送出、
+#      如今不再產生的維度會以全 0 列覆蓋
+ALGO_VERSION = 4
 
 # 每次呼叫伺服器都帶上自己的演算法版本（Redmine #27562）。Server 端 Reset 要靠各台
 # 重送補回資料，重送的是哪一版算法，決定補回來的是對的還是舊的錯誤；伺服器在
@@ -90,6 +93,22 @@ VERSION_HEADER = {"X-Collector-Algo": str(ALGO_VERSION)}
 INFLIGHT_WRITE_GRACE_SECONDS = 10 * 60
 
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+# 非 MCP 的工具呼叫裡，可能替 Redmine 寫入的那一種（#28065）。只認 Bash：Read／Edit
+# 之類的工具不會對外連線，納入只會讓區間變多、歧義變多。
+FOREIGN_TOOLS = ("Bash",)
+# 伺服器時間與本機時間的容許誤差：區間開頭往前 2 秒、結尾往後 5 秒（#28065 暫定值，
+# 用實際資料校準；見 README）。
+API_WINDOW_BEFORE = 2.0
+API_WINDOW_AFTER = 5.0
+# 先用的窄窗口：用自己的 PUT 寫入對過伺服器時間，journal 落在 tool_use 之前 0.6 秒
+# 到 tool_result 之間（見 README 的校準）。
+API_STRICT_BEFORE = 1.0
+API_STRICT_AFTER = 1.0
+# 掛在 hook 上（--pending）時只看最近這麼久的 Bash 呼叫：hook 要快，再久以前的
+# 寫入早就被排程那一輪結算掉了。
+PENDING_LOOKBACK_SECONDS = 48 * 3600
+PENDING_LOOKUP_TIMEOUT = 6.0
+# 全 0 覆蓋列的指紋：已經覆蓋過就不再送（#28065）。
 MCP_PREFIX = "mcp__nineder-redmine__"
 CREATE_ISSUE_TOOL = MCP_PREFIX + "create_issue"
 # 修改既有 note（#27641）。它的用量只經由 ai_usage_inline.py 夾帶、由伺服器記成
@@ -156,6 +175,11 @@ def load_state() -> dict:
     # posted 分開：posted 會被 Reset 範圍繞過（那些天要重送），這裡不會——
     # journal 刪了就不會回來，不管重掃幾次都不該再進佇列。
     state.setdefault("gone", [])
+    # 掛到議題建立列的 API 寫入用量（REST 建票沒有 journal，#28065），以議題編號去重。
+    state.setdefault("posted_issues", [])
+    # 每日台帳每一列實際送出的伺服器維度 [日期, session, 議題編號]（#28065）。
+    # 台帳列消失時要用它判斷「同一個伺服器維度還有沒有別的來源」。
+    state.setdefault("daily_dims", {})
     return state
 
 
@@ -356,7 +380,8 @@ def note_issue(bucket: dict, issue_id: int, kind: str, day_chunks: list[dict]) -
     return bucket
 
 
-def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, list[dict]]:
+def parse_transcript(path: Path, api_matches: dict[str, list[dict]] | None = None
+                     ) -> tuple[list[dict], dict | None, str | None, list[dict]]:
     """回傳（已歸屬的區間, 尾端未歸屬的殘餘, session_id, 每日台帳候選列）。
 
     演算法是「上一次結算到這一次之間」的累積差，但結算的時機有三種：
@@ -402,6 +427,10 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
     但同一個 requestId 一旦排過一次，之後不管再出現幾次都不會重新排。
     """
     pending_tool: dict[str, str] = {}   # tool_use_id -> 工具名
+    api_matches = api_matches or {}
+    # Bash 呼叫裡伺服器確認寫入過的那些（#28065）。key 是 tool_use_id；內容由
+    # match_api_writes 事先算好——解析器本身不連網。
+    pending_api: set[str] = set()
     # 已經呼叫、但回應還沒出現在檔案裡的寫入（#27562）。檔案掃到尾端時若還有，
     # 代表正好掃在一次寫入進行中。
     inflight_writes: set[str] = set()
@@ -462,6 +491,9 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                     if not (isinstance(blk, dict) and blk.get("type") == "tool_use"):
                         continue
                     name = str(blk.get("name", ""))
+                    if blk.get("id") in api_matches and name in FOREIGN_TOOLS:
+                        pending_api.add(blk["id"])
+                        continue
                     if not name.startswith(MCP_PREFIX):
                         continue
                     pending_tool[blk["id"]] = name
@@ -509,6 +541,19 @@ def parse_transcript(path: Path) -> tuple[list[dict], dict | None, str | None, l
                     inflight_write_rid.pop(blk.get("tool_use_id"), None)
                     if blk.get("is_error"):
                         bucket["errors"] += 1
+                    if blk.get("tool_use_id") in pending_api:
+                        # 直接打 REST API 的寫入（#28065）。伺服器紀錄說這段 Bash 呼叫
+                        # 期間本人寫了這幾列，比照 MCP 寫入的不對稱規則：累積用量掛給
+                        # 第一列，其餘列只標來源、不帶用量（bucket 已歸零）。
+                        for row in api_matches[blk["tool_use_id"]]:
+                            bucket = note_issue(bucket, row["issue_id"], "write", day_chunks)
+                            if not is_empty(bucket):
+                                segments.append({"journal_id": row["journal_id"], "issue_id": row["issue_id"],
+                                                  "date": bucket["date"], "api": True, **usage_fields(bucket)})
+                            carried_date = bucket["date"]
+                            bucket = new_bucket()
+                            bucket["date"] = carried_date
+                        continue
                     for entry in write_ledger_entries(blk, pending_tool):
                         bucket = note_issue(bucket, entry["issue_id"], "write", day_chunks)
                         jid = entry["journal_id"]
@@ -632,6 +677,204 @@ def journal_id_of(block: dict, pending_tool: dict) -> int | None:
     """向下相容用：只要第一筆 write_ledger 項目的 journal 編號。"""
     entries = write_ledger_entries(block, pending_tool)
     return entries[0]["journal_id"] if entries else None
+
+
+# ----------------------------------------------------------------------
+# 直接打 REST API 的寫入（#28065）
+#
+# 用量進 Redmine 本來只有兩條路，兩條都只認 MCP 工具呼叫。curl／python／node 寫入
+# 的 journal 從 Bash 工具呼叫裡看不出來——不靠解析指令字串猜（參數、腳本內容、
+# 程式都可能寫入，逐一解析不可靠），改以伺服器紀錄為準：每一次 API 寫入伺服器當下
+# 就記了時間（GET /issue_provenance/api_writes），採集器拿每一次 Bash 呼叫的
+# 起訖時間去對。對得到才歸屬；對不到維持原本行為；對到不只一個就整列放棄。
+# ----------------------------------------------------------------------
+
+def epoch_of(ts) -> float | None:
+    if not isinstance(ts, str):
+        return None
+    try:
+        return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+_FOREIGN_USE_RE = re.compile(r'"name"\s*:\s*"(?:%s)"' % "|".join(map(re.escape, FOREIGN_TOOLS)))
+
+
+def scan_foreign_calls(path: Path, since: float | None = None) -> list[dict]:
+    """檔案裡每一次 Bash 呼叫的區間：[{"id", "session", "start", "end"}, ...]（epoch 秒）。
+
+    start 取 tool_use 那一行的時間戳、end 取對應 tool_result 那一行的。沒有回應的
+    （對話中斷）不算——沒有結尾就沒有區間。只做字串預篩再解析，不重跑整套歸屬。
+    """
+    open_calls: dict[str, tuple[float, str | None]] = {}
+    out: list[dict] = []
+    try:
+        fh = path.open(errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            if '"tool_use"' not in line and '"tool_result"' not in line:
+                continue
+            is_use = bool(_FOREIGN_USE_RE.search(line)) and '"tool_use"' in line
+            if not is_use and not open_calls:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            ts = epoch_of(rec.get("timestamp"))
+            content = (rec.get("message") or {}).get("content")
+            if ts is None or not isinstance(content, list):
+                continue
+            kind = rec.get("type")
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                if kind == "assistant" and blk.get("type") == "tool_use" and blk.get("name") in FOREIGN_TOOLS:
+                    open_calls[blk["id"]] = (ts, rec.get("sessionId"))
+                elif kind == "user" and blk.get("type") == "tool_result" and blk.get("tool_use_id") in open_calls:
+                    start, session = open_calls.pop(blk["tool_use_id"])
+                    if since is None or ts >= since:
+                        out.append({"id": blk["tool_use_id"], "session": session, "start": start, "end": ts})
+    return out
+
+
+def fetch_api_writes(base: str, key: str, t_from: float, t_to: float,
+                     timeout: float = 15.0) -> list[dict] | None:
+    """GET /issue_provenance/api_writes，翻頁取完。失敗回 None（不是空列表）——
+    「問不到」與「沒有寫入」是兩句話，呼叫端要分得出來。"""
+    def iso(t: float) -> str:
+        return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    rows: list[dict] = []
+    after_id = 0
+    while True:
+        url = (f"{base}/issue_provenance/api_writes.json?from={urllib.parse.quote(iso(t_from))}"
+               f"&to={urllib.parse.quote(iso(t_to))}&after_id={after_id}")
+        req = urllib.request.Request(url, headers={"X-Redmine-API-Key": key, **VERSION_HEADER})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read())
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        page = data.get("rows")
+        if not isinstance(page, list):
+            return None
+        rows.extend(page)
+        if not data.get("more") or not page:
+            return rows
+        after_id = page[-1]["id"]
+
+
+def match_api_writes(intervals: list[dict], rows: list[dict]) -> tuple[dict[str, list[dict]], dict]:
+    """把伺服器回的 API 寫入列分配給 Bash 呼叫區間。回傳（tool_use_id -> 列, 統計）。
+
+    規則（#28065 交接 note 第四節）：
+    * 區間兩端留容許值（API_WINDOW_BEFORE／AFTER），本機與伺服器時鐘不會一致。
+    * 一列同時落在兩個以上的區間（同時開兩個 session、或同一回合平行發出的兩個
+      Bash）：整列跳過、維持原狀，計入 ambiguous。這裡不猜是哪一個。
+    * 一列已經記過用量、而且記的不是這個區間所屬的 session：那是別人的帳，跳過
+      （foreign_measured）。是自己這個 session 記的就照樣算進來，讓重跑得到跟
+      第一次一樣的結果——不然第二次執行時伺服器不再把它當「沒量到」，這段用量
+      會回頭落進每日台帳、同一段算兩次。
+    * 沒有任何區間涵蓋的列（排程、cron、沒有 Claude 參與的腳本）自然不歸屬。
+    """
+    import bisect
+    timed = []
+    for r in rows:
+        t = epoch_of(r.get("created_at"))
+        if t is not None and r.get("issue_id") is not None:
+            timed.append((t, r["id"], r))
+    timed.sort(key=lambda x: (x[0], x[1]))
+    times = [x[0] for x in timed]
+
+    def candidates(before: float, after: float) -> dict[int, list[dict]]:
+        found: dict[int, list[dict]] = {}
+        for iv in intervals:
+            lo = bisect.bisect_left(times, iv["start"] - before)
+            hi = bisect.bisect_right(times, iv["end"] + after)
+            for i in range(lo, hi):
+                found.setdefault(timed[i][1], []).append(iv)
+        return found
+
+    # 兩層窗口：先用窄的（實測自己的 PUT 寫入落在 tool_use 前 0.6 秒到 tool_result 之間），
+    # 窄窗口恰好一個區間就採用；窄窗口沒有任何區間才放寬到容許值。不然連續快速打好幾次
+    # API 時，後一次的寫入會落進前一次區間的寬鬆尾巴，變成「兩個區間都涵蓋」而被誤判歧義。
+    strict = candidates(API_STRICT_BEFORE, API_STRICT_AFTER)
+    loose = candidates(API_WINDOW_BEFORE, API_WINDOW_AFTER)
+    claims = {rid: (strict[rid] if rid in strict else loose[rid]) for rid in loose}
+
+    matches: dict[str, list[dict]] = {}
+    stats = {"rows": len(rows), "intervals": len(intervals), "matched": 0,
+             "ambiguous": 0, "foreign_measured": 0, "unclaimed": 0}
+    for t, rid, row in timed:
+        ivs = claims.get(rid)
+        if not ivs:
+            stats["unclaimed"] += 1
+            continue
+        if len(ivs) > 1:
+            stats["ambiguous"] += 1
+            continue
+        iv = ivs[0]
+        if row.get("measured") and row.get("ai_session") != iv["session"]:
+            stats["foreign_measured"] += 1
+            continue
+        matches.setdefault(iv["id"], []).append(row)
+        stats["matched"] += 1
+    for lst in matches.values():
+        lst.sort(key=lambda r: (epoch_of(r["created_at"]) or 0, r["id"]))
+    return matches, stats
+
+
+def resolve_api_matches(target_paths: list[Path], all_files: list[Path], base: str, key: str,
+                        since: float | None = None, timeout: float = 15.0
+                        ) -> tuple[dict[str, list[dict]], dict, set[str]]:
+    """要掃描的檔案裡，哪些 Bash 呼叫對得到伺服器記的 API 寫入。
+
+    回傳（matches, 統計, 沒能解決的檔案路徑）。查詢失敗時 matches 為空、
+    沒能解決的檔案＝有任何 Bash 區間的那些——呼叫端據此不記「掃描過了」，
+    下一次再試，而不是把這次沒對成當成最終結果。
+
+    歧義要跨檔案判斷，所以另外掃「修改時間不早於最早區間」的其他檔案：更早
+    就停止更新的檔案不可能含有更晚的區間。
+    """
+    target_set = {str(p) for p in target_paths}
+    per_path: dict[str, list[dict]] = {}
+    for p in target_paths:
+        ivs = scan_foreign_calls(p, since)
+        if ivs:
+            per_path[str(p)] = ivs
+    stats = {"ok": True, "rows": 0, "intervals": 0, "matched": 0, "ambiguous": 0,
+             "foreign_measured": 0, "unclaimed": 0}
+    if not per_path:
+        return {}, stats, set()
+
+    own = [iv for ivs in per_path.values() for iv in ivs]
+    earliest = min(iv["start"] for iv in own) - API_WINDOW_BEFORE
+    latest = max(iv["end"] for iv in own) + API_WINDOW_AFTER
+    others: list[dict] = []
+    for p in all_files:
+        if str(p) in target_set:
+            continue
+        try:
+            if p.stat().st_mtime < earliest:
+                continue
+        except OSError:
+            continue
+        others.extend(scan_foreign_calls(p, earliest))
+    intervals = own + others
+
+    rows = fetch_api_writes(base, key, earliest, latest, timeout)
+    if rows is None:
+        stats["ok"] = False
+        stats["intervals"] = len(own)
+        return {}, stats, set(per_path)
+    matches, m = match_api_writes(intervals, rows)
+    stats.update(m)
+    own_ids = {iv["id"] for iv in own}
+    return {k: v for k, v in matches.items() if k in own_ids}, stats, set()
 
 
 # ----------------------------------------------------------------------
@@ -994,6 +1237,14 @@ def payload_for_daily(chunk: dict, session_id: str) -> dict:
 
 ATTRIBUTION_RANK = {"none": 0, "read": 1, "write": 2}
 
+ZERO_FP = json.dumps([{k: 0 for k in TOKEN_KEYS}, 0, 0, 0], sort_keys=True)
+
+
+def is_zero_payload(p: dict) -> bool:
+    """全 0 的台帳列：覆蓋用，不是用量。真的量到的列至少有一次請求。"""
+    return (p.get("ai_requests", 0) == 0 and p.get("ai_prompts", 0) == 0
+            and p.get("ai_errors", 0) == 0 and not any(p["tokens"].values()))
+
 
 def merge_daily_chunks(chunks: list[dict]) -> list[dict]:
     """同一份對話紀錄裡，同一天、同一張議題的多段合併成一列。
@@ -1324,7 +1575,7 @@ def log_run(record: dict) -> None:
 # 當前區間（寫 note 時一併帶上）
 # ----------------------------------------------------------------------
 
-def emit_pending(session: str | None) -> int:
+def emit_pending(session: str | None, base: str = DEFAULT_BASE) -> int:
     """印出「上次歸帳到現在」的用量，格式就是 plugin 標頭吃的那一份。
 
     這是排程的替代方案：與其事後掃描補記，不如在寫 note 的當下把數字
@@ -1345,7 +1596,18 @@ def emit_pending(session: str | None) -> int:
         # 最近異動的那一個就是正在進行的這一段。
         path = files[-1]
 
-    _segments, leftover, session_id, _day_chunks = parse_transcript(path)
+    # 這段期間若有直接打 REST API 的寫入（#28065），那段用量歸給那次寫入，不能再被
+    # 下一次 MCP 寫入帶走一次。hook 必須快而且寧可不帶也不能壞：任何失敗都退回舊行為
+    # （不比對），絕不讓查詢拖垮寫入。
+    api_matches: dict = {}
+    try:
+        files = sorted(PROJECTS_DIR.glob("*/*.jsonl"))
+        api_matches, _stats, _unresolved = resolve_api_matches(
+            [path], files, base, api_key(), since=time.time() - PENDING_LOOKBACK_SECONDS,
+            timeout=PENDING_LOOKUP_TIMEOUT)
+    except (Exception, SystemExit):  # noqa: BLE001
+        api_matches = {}
+    _segments, leftover, session_id, _day_chunks = parse_transcript(path, api_matches)
     if leftover is None or session_id is None:
         # 上一次寫入之後還沒有新的用量。回一個明確的空，而不是一份全是
         # 零的payload —— 送出零會在 Redmine 留下「這則 note 沒花任何成本」
@@ -1387,7 +1649,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.pending:
-        return emit_pending(args.session)
+        return emit_pending(args.session, args.base)
 
     if args.retry_rejected:
         key = "" if args.dry_run else api_key()
@@ -1484,11 +1746,37 @@ def _scan_and_send(args) -> dict:
     files = sorted(PROJECTS_DIR.glob("*/*.jsonl"))
     scanned = skipped = 0
     to_send: list[tuple[int, dict]] = []
+    issue_to_send: list[tuple[int, dict]] = []   # REST 建票沒有 journal：掛在議題建立列（#28065）
+    posted_issues = set(state.get("posted_issues", []))
+    vanished: list[tuple[str, str, str]] = []    # (台帳去重鍵, 檔案路徑, session)：先前送過、這次不再產生的列
     # 每一筆：{"key":, "fingerprint":, "payload":}。key 以檔案路徑＋日期／歸屬／
     # 議題組成，用來判斷這筆資料自上次送出後有沒有變過，不必每次都重送。
     daily_items: list[dict] = []
     # 每一筆：(session_id, compute_batch_correction 算出來的 {issue_id: usage} 字典)。
     batch_todo: list[tuple[str, dict[int, dict], str]] = []
+
+    # 直接打 REST API 的寫入（#28065）：先替所有「這次要重新解析」的檔案，把 Bash 呼叫
+    # 對上伺服器記的 API 寫入。dry-run 也查（只是 GET，沒有副作用）；--baseline 不查，
+    # 它的承諾是不呼叫任何 API。
+    parse_paths = [p for p in files
+                   if force_rescan or reset_days
+                   or state["files"].get(str(p)) != f"{p.stat().st_mtime_ns}:{p.stat().st_size}"]
+    api_matches: dict[str, list[dict]] = {}
+    api_stats: dict | None = None
+    api_unresolved: set[str] = set()
+    if not args.baseline and parse_paths:
+        lookup_key = key
+        if not lookup_key:
+            try:
+                lookup_key = api_key()
+            except SystemExit:
+                lookup_key = ""
+        if lookup_key:
+            api_matches, api_stats, api_unresolved = resolve_api_matches(
+                parse_paths, files, args.base, lookup_key)
+            if not api_stats["ok"]:
+                print("查詢伺服器的 API 寫入紀錄失敗：本次不比對直接 REST 寫入，"
+                      f"含 Bash 呼叫的 {len(api_unresolved)} 個檔案下次執行會重新解析")
 
     for path in files:
         stat = path.stat()
@@ -1522,10 +1810,16 @@ def _scan_and_send(args) -> dict:
         # 累積差要從區間開頭算起，從中途接手會把一段拆成兩半各記一次。
         # 重複解析的成本遠小於算錯的代價，而且 posted／daily_sent 會擋下重送。
         if main_stale:
-            segments, _leftover, session_id, day_chunks = parse_transcript(path)
+            segments, _leftover, session_id, day_chunks = parse_transcript(path, api_matches)
             scanned += 1
             if session_id is not None:
                 for seg in segments:
+                    if seg.get("api") and seg.get("journal_id") is None:
+                        # REST 建票：沒有 journal，用量掛議題建立列（#28065）。
+                        if seg["issue_id"] in posted_issues and seg.get("date") not in reset_days:
+                            continue
+                        issue_to_send.append((seg["issue_id"], payload_for(seg, session_id)))
+                        continue
                     # posted 正常擋掉已經送過的 journal——但如果這一則剛好落在
                     # 被 Reset 的範圍內，伺服器那一列的用量欄位已經被清空，
                     # 「本地記得送過」跟「伺服器上還在」不再是同一件事，這時
@@ -1537,10 +1831,15 @@ def _scan_and_send(args) -> dict:
                         continue  # 已確認 journal 不存在（#27312），Reset 範圍也不例外
                     to_send.append((seg["journal_id"], payload_for(seg, session_id)))
 
+                # 這份檔案有 API 寫入歸屬的話，none 段落也一定要重算——上面那條「結構上不可能
+                # 受影響」的前提在這裡不成立：被拿走用量的正是這些段落（#28065）。
+                suppress_none = suppress_none_daily and not any(seg.get("api") for seg in segments)
+                current_keys: set[str] = set()
                 for chunk in merge_daily_chunks(day_chunks):
-                    if suppress_none_daily and chunk["attribution"] == "none":
-                        continue  # 見上：自動全量重掃不動這段，維持原有指紋，留給正常增量掃描處理
                     row_key = f"{path}::{chunk['date']}::{chunk['attribution']}::{chunk['issue_id']}"
+                    current_keys.add(row_key)
+                    if suppress_none and chunk["attribution"] == "none":
+                        continue  # 見上：自動全量重掃不動這段，維持原有指紋，留給正常增量掃描處理
                     row_fp = json.dumps(
                         [chunk["tokens"], chunk["requests"], chunk["prompts"], chunk["errors"]],
                         sort_keys=True)
@@ -1552,13 +1851,51 @@ def _scan_and_send(args) -> dict:
                         continue  # 自上次成功送出後沒有變化，不必重送
                     daily_items.append({"key": row_key, "fingerprint": row_fp,
                                          "payload": payload_for_daily(chunk, session_id)})
-                state["files"][str(path)] = fingerprint
+                # 先前送過、這次重新解析後不再產生的台帳列（用量改掛 journal 之後，那一天那
+                # 張議題可能整列消失）。只送「這次算出來的列」不會撤回伺服器上已經存在的列，
+                # 同一段用量就會同時在兩張表——#27562 的重複計入就是這個形狀（#28065）。
+                prefix = f"{path}::"
+                for k in daily_sent:
+                    if k.startswith(prefix) and k not in current_keys and k.split("::")[-3] not in reset_days:
+                        vanished.append((k, str(path), session_id))
+                if str(path) not in api_unresolved:
+                    state["files"][str(path)] = fingerprint
 
         if correction_stale:
             events, csession_id = parse_creation_events(path)
             correction_tracked[str(path)] = fingerprint
             if events and csession_id:
                 batch_todo.append((csession_id, compute_batch_correction(events), str(path)))
+
+    daily_dims: dict[str, list] = state["daily_dims"]
+    if vanished:
+        def dim_of(k: str) -> tuple:
+            if k in daily_dims:
+                d, sess, iid = daily_dims[k]
+                return (d, sess, iid)
+            fpath, date, _attr, iid = k.rsplit("::", 3)
+            return (date, Path(fpath).stem, None if iid == "None" else int(iid))
+
+        gone_keys = {k for k, _, _ in vanished}
+        covered = {(it["payload"]["usage_date"], it["payload"]["ai_session"], it["payload"]["issue_id"])
+                   for it in daily_items}
+        live_paths = {str(p) for p in files}
+        covered |= {dim_of(k) for k in daily_sent if k not in gone_keys and k.split("::")[0] in live_paths}
+        for k, _fpath, sess in vanished:
+            date, attr, iid = k.rsplit("::", 3)[1:]
+            iid = None if iid == "None" else int(iid)
+            dim = (date, sess, iid)
+            if dim in covered:
+                # 同一個伺服器維度還有別的來源（同一個 session 跨檔案）：不歸零，免得把別人那份
+                # 也蓋掉；這把鍵本身不再需要追蹤。
+                daily_sent.pop(k, None)
+                daily_dims.pop(k, None)
+                continue
+            daily_items.append({"key": k, "fingerprint": ZERO_FP, "payload": {
+                "usage_date": date, "ai_session": sess, "issue_id": iid, "attribution": attr,
+                "ai_name": AI_NAME, "ai_model": "unknown", "ai_effort": None,
+                "ai_prompts": 0, "ai_requests": 0, "ai_errors": 0,
+                "tokens": {t: 0 for t in TOKEN_KEYS}}})
 
     # 上次沒送成功的先試，失敗的原因通常是暫時的
     retry = state.get("pending", [])
@@ -1586,6 +1923,9 @@ def _scan_and_send(args) -> dict:
                 "journal_baselined": len(marked), "daily_baselined": len(daily_items),
                 "resets": {"count": len(resets), "days": len(reset_days)}}
 
+    issue_retry = [(e["issue_id"], e["payload"]) for e in state.get("pending_issues", [])
+                   if e["issue_id"] not in posted_issues]
+    issue_queue = issue_retry + issue_to_send
     sent = exists = failed = 0
     write_delivered_tokens = 0  # 驗收第八組：報表要能對得上帳，只算真的送達的
     still_pending: list[dict] = []
@@ -1621,6 +1961,26 @@ def _scan_and_send(args) -> dict:
             if args.verbose:
                 print(f"  journal {journal_id}: 失敗 {exc}")
 
+    still_pending_issues: list[dict] = []
+    for iid, body in issue_queue:
+        if args.dry_run:
+            if args.verbose:
+                print(f"  [dry-run] 議題建立列 #{iid}: {sum(body['tokens'].values()):,} token")
+            continue
+        try:
+            result = post_issue_usage(args.base, key, iid, body)
+            posted_issues.add(iid)
+            write_delivered_tokens += sum(body["tokens"].values())
+            if result == "exists":
+                exists += 1
+            else:
+                sent += 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            still_pending_issues.append({"issue_id": iid, "payload": body})
+            if args.verbose:
+                print(f"  議題建立列 #{iid}: 失敗 {exc}")
+
     daily_report = None
     daily_delivered_tokens = 0  # 驗收第八組：只算真的送達的，隔離／待重試的不算
     if args.dry_run:
@@ -1653,8 +2013,17 @@ def _scan_and_send(args) -> dict:
                 daily_report = f"送出失敗，不會自動重試同一批：{structural_error}"
             else:
                 for item in sent_items:
+                    p = item["payload"]
+                    zero = is_zero_payload(p)
                     for k in item.get("merged_keys", [item["key"]]):
-                        daily_sent[k] = item["fingerprint"]
+                        if zero:
+                            # 全 0 覆蓋列送出了：這把鍵的任務結束，不再追蹤，免得每次重掃
+                            # 同一個消失的維度又送一次。
+                            daily_sent.pop(k, None)
+                            daily_dims.pop(k, None)
+                        else:
+                            daily_sent[k] = item["fingerprint"]
+                            daily_dims[k] = [p["usage_date"], p["ai_session"], p["issue_id"]]
                 daily_delivered_tokens = sum(
                     sum(it["payload"]["tokens"].values()) for it in sent_items)
                 state["daily_sent"] = daily_sent
@@ -1683,6 +2052,8 @@ def _scan_and_send(args) -> dict:
 
     state["posted"] = sorted(posted)
     state["pending"] = still_pending
+    state["posted_issues"] = sorted(posted_issues)
+    state["pending_issues"] = still_pending_issues if not args.dry_run else state.get("pending_issues", [])
     state["gone"] = sorted(gone_ids)
     record_rejected_write_rows(gone_rows)
     if not args.dry_run:
@@ -1697,7 +2068,7 @@ def _scan_and_send(args) -> dict:
             state["last_reset_check"] = latest_reset_at
         save_state(state)
 
-    attributed = sum(sum(b["tokens"].values()) for _, b in queue)
+    attributed = sum(sum(b["tokens"].values()) for _, b in queue + issue_queue)
     daily_total = sum(sum(item["payload"]["tokens"].values()) for item in daily_items)
     print(f"檔案：掃描 {scanned}，未變動略過 {skipped}")
     total = attributed + daily_total
@@ -1721,6 +2092,12 @@ def _scan_and_send(args) -> dict:
         # 的下次還會再試，只有已隔離的才是真的救不回來（見 daily_usage_rejected.jsonl）。
         print(f"對帳：總量 {total:,}（寫入紀錄表 {write_delivered_tokens:,} ＋ "
               f"每日台帳 {daily_delivered_tokens:,} ＋ 仍無法處理 {unprocessable:,}）")
+    if api_stats and api_stats["ok"] and api_stats["intervals"]:
+        print(f"直接 REST 寫入：伺服器列 {api_stats['rows']}，歸屬 {api_stats['matched']}，"
+              f"歧義跳過 {api_stats['ambiguous']}，別人已記帳跳過 {api_stats['foreign_measured']}，"
+              f"無 Bash 區間涵蓋 {api_stats['unclaimed']}"
+              + (f"；台帳消失列覆蓋為 0：{sum(1 for it in daily_items if is_zero_payload(it['payload']))}"
+                 if vanished else ""))
     if batch_correction["sessions"]:
         print(f"批次校正：{batch_correction['sessions']} 個 session，"
               f"校正 {batch_correction['corrected']}，已存在 {batch_correction['skipped']}，"
@@ -1734,6 +2111,7 @@ def _scan_and_send(args) -> dict:
         "daily_ledger": {"rows": len(daily_items), "tokens": daily_total, "result": daily_report,
                           "delivered_tokens": daily_delivered_tokens},
         "batch_correction": batch_correction,
+        "api_writes": api_stats,
         "reconcile": {"total": total, "delivered": delivered, "unprocessable": unprocessable},
         "rescan_all": force_rescan, "auto_rescan": auto_rescan, "algo_version": ALGO_VERSION,
         "resets": {"count": len(resets), "days": len(reset_days)},
