@@ -1137,8 +1137,14 @@ def apply_batch_corrections(final: dict[int, dict], session_id: str, base: str, 
 
     手動的 --correct-batch 與排程流程的自動批次校正共用這一支——兩邊唯一的
     差別是「怎麼取得 events」，送出的邏輯不重複寫兩份。
+
+    議題已不存在（或對自己不可見）時伺服器回 404／410（#28065）：那是永遠不會
+    成功的重試，記為 gone 而不是 failed。以前記成 failed，結果那個檔案永遠不被標成
+    「校正過了」，之後每次執行都再送一輪、再失敗，整次 exit code 因此永遠是 1，把真正
+    需要處理的失敗淹沒掉（比照 journal 那邊 410 隔離的道理，#27312）。404 也可能是
+    權限（被移出專案、議題轉私有），所以計數與詳情照樣印出來，不是靜默吞掉。
     """
-    corrected = skipped = failed = 0
+    corrected = skipped = failed = gone = 0
     for issue_id, usage in final.items():
         total = sum(usage["tokens"].values())
         if dry_run or verbose:
@@ -1153,11 +1159,20 @@ def apply_batch_corrections(final: dict[int, dict], session_id: str, base: str, 
                 skipped += 1
             else:
                 corrected += 1
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 410):
+                gone += 1
+                if verbose:
+                    print(f"  議題 #{issue_id}：已不存在或不可見（HTTP {exc.code}），略過")
+            else:
+                failed += 1
+                if verbose:
+                    print(f"  議題 #{issue_id}：失敗 {exc}")
         except Exception as exc:  # noqa: BLE001
             failed += 1
             if verbose:
                 print(f"  議題 #{issue_id}：失敗 {exc}")
-    return {"corrected": corrected, "skipped": skipped, "failed": failed}
+    return {"corrected": corrected, "skipped": skipped, "failed": failed, "gone": gone}
 
 
 def run_batch_correction(args) -> dict:
@@ -1194,7 +1209,8 @@ def run_batch_correction(args) -> dict:
 
     print(f"session {session_id}：{len(events)} 個建立事件，{len(final)} 張議題")
     if not args.dry_run:
-        print(f"已校正 {result['corrected']}，已存在略過 {result['skipped']}，失敗 {result['failed']}")
+        print(f"已校正 {result['corrected']}，已存在略過 {result['skipped']}，"
+              f"議題已不存在或不可見 {result['gone']}，失敗 {result['failed']}")
         state = load_state()
         stat = path.stat()
         state["correction_files"][str(path)] = f"{stat.st_mtime_ns}:{stat.st_size}"
@@ -2037,13 +2053,13 @@ def _scan_and_send(args) -> dict:
     # 批次校正（#27163）：跟寫入紀錄表／每日台帳不同軌——DELETE＋POST 本身
     # 就是覆蓋式的，沒有「已存在就跳過」的必要，也沒有 pending 重試佇列；
     # 單筆失敗只影響那一張議題，不影響同一批裡的其他張。
-    batch_correction = {"sessions": 0, "corrected": 0, "skipped": 0, "failed": 0}
+    batch_correction = {"sessions": 0, "corrected": 0, "skipped": 0, "failed": 0, "gone": 0}
     for csession_id, final, cpath in batch_todo:
         if not final:
             continue
         batch_correction["sessions"] += 1
         r = apply_batch_corrections(final, csession_id, args.base, key, args.dry_run, args.verbose)
-        for k in ("corrected", "skipped", "failed"):
+        for k in ("corrected", "skipped", "failed", "gone"):
             batch_correction[k] += r[k]
         if r["failed"] and not args.dry_run:
             # create_issue 的用量只剩這一條路徑（#27562）：校正有任何一張送失敗，
@@ -2101,6 +2117,7 @@ def _scan_and_send(args) -> dict:
     if batch_correction["sessions"]:
         print(f"批次校正：{batch_correction['sessions']} 個 session，"
               f"校正 {batch_correction['corrected']}，已存在 {batch_correction['skipped']}，"
+              f"議題已不存在或不可見而略過 {batch_correction['gone']}，"
               f"失敗 {batch_correction['failed']}"
               + ("（dry-run，未送出）" if args.dry_run else ""))
     return {
