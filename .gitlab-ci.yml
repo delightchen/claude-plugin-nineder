@@ -1,14 +1,27 @@
-# Spike for Redmine #27127: probes whether an explicit image can be pulled. Spike branch only.
-spike-image:
+# GitLab main -> GitHub 鏡像對帳與補推（Redmine #27127）。邏輯在 scripts/mirror_sync.py。
+# 需要的 CI variables（Settings > CI/CD > Variables，皆勾 Masked + Protected）：
+#   GH_MIRROR_TOKEN   GitHub 細粒度 token，只限本鏡像 repo、只給 Contents 讀寫
+#   REDMINE_API_KEY   失敗時把留言貼回發動議題
+
+default:
   image: python:3.12-alpine
+  before_script:
+    - apk add --no-cache git >/dev/null
+
+# main 有新 commit 時立刻對帳；排程每 15 分鐘再對一次，抓 push 事件那次失敗或 runner 當機的漏網
+mirror-sync:
+  resource_group: mirror-sync
   rules:
-    - if: '$CI_COMMIT_BRANCH == "feature/27127-ci-spike"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
-    - |
-      python3 --version
-      apk add --no-cache git curl >/dev/null 2>&1 && echo "apk ok" || echo "apk FAILED"
-      git --version
-      curl --version | head -1
-      echo "depth=$GIT_DEPTH"
-      git log --oneline -3
-      git log --format='%H %P' -1
+    - python3 scripts/mirror_sync.py
+
+# 開發分支上只做唯讀判斷，不推送、不貼留言
+mirror-sync-dryrun:
+  variables:
+    TARGET_REF: refs/heads/$CI_COMMIT_BRANCH
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^feature\/27127-/'
+  script:
+    - python3 scripts/mirror_sync.py --dry-run
