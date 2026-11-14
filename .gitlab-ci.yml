@@ -1,23 +1,14 @@
-# Spike for Redmine #27127: only probes the runner environment. Runs on the spike branch only.
-spike-probe:
+# Spike for Redmine #27127: probes whether an explicit image can be pulled. Spike branch only.
+spike-image:
+  image: python:3.12-alpine
   rules:
     - if: '$CI_COMMIT_BRANCH == "feature/27127-ci-spike"'
   script:
     - |
-      echo "runner=$CI_RUNNER_DESCRIPTION id=$CI_RUNNER_ID tags=$CI_RUNNER_TAGS"
-      echo "cgroup: $(head -1 /proc/1/cgroup 2>/dev/null)"
-      uname -a
-      head -3 /etc/os-release 2>/dev/null
-      id
-      for c in git curl sh bash python3 jq; do
-        if command -v "$c" >/dev/null; then echo "have $c"; else echo "MISSING $c"; fi
-      done
-      git --version || true
-      echo "--- reach github (no credentials)"
-      curl -sS -o /dev/null -m 15 -w 'github.com %{http_code}\n' https://github.com || echo "github.com UNREACHABLE"
-      curl -sS -o /dev/null -m 15 -w 'api.github.com %{http_code}\n' https://api.github.com || echo "api.github.com UNREACHABLE"
-      GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/delightchen/claude-plugin-nineder.git HEAD 2>&1 | head -2 || true
-      echo "--- reach telegram"
-      curl -sS -o /dev/null -m 15 -w 'api.telegram.org %{http_code}\n' https://api.telegram.org || echo "telegram UNREACHABLE"
-      echo "--- ci vars visible (names only)"
-      env | grep -E '^(GH_|TELEGRAM_)' | cut -d= -f1 || echo none
+      python3 --version
+      apk add --no-cache git curl >/dev/null 2>&1 && echo "apk ok" || echo "apk FAILED"
+      git --version
+      curl --version | head -1
+      echo "depth=$GIT_DEPTH"
+      git log --oneline -3
+      git log --format='%H %P' -1
