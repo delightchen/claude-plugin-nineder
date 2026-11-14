@@ -3,18 +3,21 @@ spike-probe:
   rules:
     - if: '$CI_COMMIT_BRANCH == "feature/27127-ci-spike"'
   script:
-    - echo "runner=$CI_RUNNER_DESCRIPTION id=$CI_RUNNER_ID tags=$CI_RUNNER_TAGS"
-    - echo "executor-hint: $(cat /proc/1/cgroup 2>/dev/null | head -1)"
-    - uname -a
-    - cat /etc/os-release 2>/dev/null | head -3
-    - id
-    - for c in git curl sh bash python3 jq; do printf '%s: ' "$c"; command -v "$c" || echo MISSING; done
-    - git --version || true
-    - echo "--- reach github (no credentials)"
-    - curl -sS -o /dev/null -m 15 -w 'github.com %{http_code}\n' https://github.com || echo "github.com UNREACHABLE"
-    - curl -sS -o /dev/null -m 15 -w 'api.github.com %{http_code}\n' https://api.github.com || echo "api.github.com UNREACHABLE"
-    - GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/delightchen/claude-plugin-nineder.git HEAD 2>&1 | head -2 || true
-    - echo "--- reach telegram"
-    - curl -sS -o /dev/null -m 15 -w 'api.telegram.org %{http_code}\n' https://api.telegram.org || echo "telegram UNREACHABLE"
-    - echo "--- ci vars visible (names only)"
-    - env | grep -E '^(GH_|TELEGRAM_)' | cut -d= -f1 || echo none
+    - |
+      echo "runner=$CI_RUNNER_DESCRIPTION id=$CI_RUNNER_ID tags=$CI_RUNNER_TAGS"
+      echo "cgroup: $(head -1 /proc/1/cgroup 2>/dev/null)"
+      uname -a
+      head -3 /etc/os-release 2>/dev/null
+      id
+      for c in git curl sh bash python3 jq; do
+        if command -v "$c" >/dev/null; then echo "have $c"; else echo "MISSING $c"; fi
+      done
+      git --version || true
+      echo "--- reach github (no credentials)"
+      curl -sS -o /dev/null -m 15 -w 'github.com %{http_code}\n' https://github.com || echo "github.com UNREACHABLE"
+      curl -sS -o /dev/null -m 15 -w 'api.github.com %{http_code}\n' https://api.github.com || echo "api.github.com UNREACHABLE"
+      GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/delightchen/claude-plugin-nineder.git HEAD 2>&1 | head -2 || true
+      echo "--- reach telegram"
+      curl -sS -o /dev/null -m 15 -w 'api.telegram.org %{http_code}\n' https://api.telegram.org || echo "telegram UNREACHABLE"
+      echo "--- ci vars visible (names only)"
+      env | grep -E '^(GH_|TELEGRAM_)' | cut -d= -f1 || echo none
